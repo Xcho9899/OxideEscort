@@ -79,6 +79,7 @@ def create_cryptobot_invoice(amount_usd: float, description: str, user_id: int):
         payload = {
             "amount": str(amount_usd),
             "fiat_currency": "USD",
+            "asset": "USDT",
             "description": description,
             "expires_in": 3600
         }
