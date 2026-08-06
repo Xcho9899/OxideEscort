@@ -73,7 +73,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cleanup_memory()
     
     await update.message.reply_text(
-        "👋 *OxideEscort - Маркетплейс услуг*\n\n🎮 Oxide Survival Island\n💵 USDT TRC-20\n💰 Комиссия 5%",
+        "👋 *OxideEscort - Маркетплейс услуг*\n\n🎮 Oxide Survival Island\n💵 USDT USD\n💰 Комиссия 5%",
         reply_markup=get_main_menu(),
         parse_mode="Markdown"
     )
@@ -115,7 +115,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for offer in offers:
                 price_rub = convert_usd_to_rub(offer['price'])
                 keyboard.append([InlineKeyboardButton(
-                    f"💰 {offer['quantity']} {offer['unit']} = ${offer['price']} (≈{price_rub:.0f}р)",
+                    f"💰 {offer['quantity']} {offer['unit']} = ${offer['price']} USD (≈{price_rub:.0f}р)",
                     callback_data=f"offer_{offer['id']}"
                 )])
             keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="board")])
@@ -140,30 +140,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         
         await query.edit_message_text(
-            f"💳 *Кошелек*\n\n💵 Баланс: {balance:.0f}р (${balance / rate:.2f})",
+            f"💳 *Кошелек*\n\n💵 Баланс: {balance:.0f}р (${balance / rate:.2f} USD)",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
     
     elif data == "deposit":
+        rate = get_usdt_rub_rate()
         keyboard = [
-            [InlineKeyboardButton("💳 Оплатить 10 USDT", callback_data="pay_10usdt")],
-            [InlineKeyboardButton("💳 Оплатить 50 USDT", callback_data="pay_50usdt")],
-            [InlineKeyboardButton("💳 Оплатить 100 USDT", callback_data="pay_100usdt")],
             [InlineKeyboardButton("🏠 Меню", callback_data="return_main")]
         ]
         await query.edit_message_text(
-            "💵 *Выбери сумму:*",
+            f"💵 *Введите сумму в USD*\n\nТекущий курс: 1 USD = {rate:.2f}р",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
-    
-    elif data.startswith("pay_"):
-        amount_str = data.replace("pay_", "").replace("usdt", "")
-        amount_usd = int(amount_str)
-        context.user_data['payment_amount_usd'] = amount_usd
-        
-        await start_payment(update, context, amount_usd)
+        return DEPOSIT_AMOUNT
     
     elif data == "my_offers":
         my_offers = [o for o in offers_storage.values() if o['author_id'] == user_id]
@@ -172,7 +164,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "📊 *Мои предложения:*\n\n"
             for offer in my_offers:
                 price_rub = convert_usd_to_rub(offer['price'])
-                text += f"💰 {offer['quantity']} {offer['unit']} = ${offer['price']} (≈{price_rub:.0f}р)\n"
+                text += f"💰 {offer['quantity']} {offer['unit']} = ${offer['price']} USD (≈{price_rub:.0f}р)\n"
         else:
             text = "📭 Предложений нет\n\n"
         
@@ -206,13 +198,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text = "📜 *История:*\n\n"
             for trans in transactions[-10:]:
-                text += f"💰 {trans['description']}\n{trans['amount']:.0f}р\n\n"
+                text += f"💰 {trans['description']}\n"
             
             await query.edit_message_text(text, reply_markup=get_main_menu(), parse_mode="Markdown")
     
     elif data == "help":
         await query.edit_message_text(
-            "❓ *Справка*\n\n1. Найди услугу\n2. Пополни баланс\n3. Создай предложение\n\n💰 Комиссия 5%\n💵 USDT TRC-20",
+            "❓ *Справка*\n\n1. Найди услугу\n2. Пополни баланс\n3. Создай предложение\n\n💰 Комиссия 5%\n💵 USDT USD",
             reply_markup=get_main_menu(),
             parse_mode="Markdown"
         )
@@ -220,19 +212,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "return_main":
         await query.edit_message_text("🎯 *Меню*", reply_markup=get_main_menu(), parse_mode="Markdown")
 
+async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount_usd = float(update.message.text)
+        
+        if amount_usd < 1:
+            await update.message.reply_text("❌ Минимум $1 USD!", reply_markup=get_main_menu())
+            return DEPOSIT_AMOUNT
+        
+        context.user_data['payment_amount_usd'] = amount_usd
+        await start_payment(update, context, int(amount_usd))
+        return ConversationHandler.END
+    except:
+        await update.message.reply_text("❌ Ошибка! Введите число!", reply_markup=get_main_menu())
+        return DEPOSIT_AMOUNT
+
 async def start_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, amount_usd: int):
     user_id = update.effective_user.id
     amount_cents = amount_usd * 100
     
-    prices = [LabeledPrice(label=f"{amount_usd} USDT", amount=amount_cents)]
+    prices = [LabeledPrice(label=f"${amount_usd} USD", amount=amount_cents)]
     
     await context.bot.send_invoice(
         chat_id=user_id,
         title="Пополнение баланса OxideEscort",
-        description=f"Пополнение на {amount_usd} USDT",
+        description=f"Пополнение на ${amount_usd} USD",
         payload=f"payload_{user_id}_{amount_usd}",
         provider_token=config.CRYPTO_BOT_TOKEN,
-        currency="XTR",
+        currency="USD",
         prices=prices,
         start_parameter="test"
     )
@@ -250,11 +257,11 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
     user_history[user_id].append({
         'type': 'deposit',
         'amount': amount_rub,
-        'description': f'Платеж {amount_usd} USDT'
+        'description': f'Платеж ${amount_usd} USD'
     })
     
     await update.message.reply_text(
-        f"✅ *Платеж успешен!*\n\n💰 +{amount_rub:.0f}р ({amount_usd} USDT)\n🆔 ID: {update.message.successful_payment.telegram_payment_charge_id}",
+        f"✅ *Платеж успешен!*\n\n💰 +${amount_usd} USD\n💵 +{amount_rub:.0f}р\n🆔 ID: {update.message.successful_payment.telegram_payment_charge_id}",
         reply_markup=get_main_menu(),
         parse_mode="Markdown"
     )
@@ -315,7 +322,7 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     price_rub = convert_usd_to_rub(price)
     
     await update.message.reply_text(
-        f"✅ *Создано!*\n\n{CATEGORIES[category]}\n📊 {quantity} {unit}\n💰 ${price} (≈{price_rub:.0f}р)",
+        f"✅ *Создано!*\n\n{CATEGORIES[category]}\n📊 {quantity} {unit}\n💰 ${price} USD (≈{price_rub:.0f}р)",
         reply_markup=get_main_menu(),
         parse_mode="Markdown"
     )
@@ -326,6 +333,14 @@ def main():
     
     app.add_handler(CommandHandler("start", start))
     
+    deposit_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(button_handler, pattern="deposit")],
+        states={
+            DEPOSIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_deposit_amount)],
+        },
+        fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
+    )
+    
     quantity_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="create_")],
         states={
@@ -335,14 +350,15 @@ def main():
         fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
     )
     
+    app.add_handler(deposit_conv)
     app.add_handler(quantity_conv)
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(CallbackQueryHandler(button_handler))
     
     print("🚀 OxideEscort БОТ ЗАПУЩЕН!")
-    print("✅ Реальные платежи через CryptoBot")
-    print("💵 USDT TRC-20")
+    print("✅ Ввод суммы пополнения")
+    print("💵 USDT USD + РУБ")
     app.run_polling()
 
 if __name__ == '__main__':
