@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 import config
 import asyncio
 import json
+import re
 
 logging.basicConfig(level=logging.INFO)
 
@@ -84,6 +85,7 @@ invoices_map = {}
 CRYPTOBOT_API = "https://pay.crypt.bot/api"
 CRYPTOBOT_TOKEN = config.CRYPTO_BOT_TOKEN
 INVOICE_TIMEOUT = 300  # 5 минут в секундах
+MIN_WITHDRAW = 5  # Минимум для вывода $5
 
 def cleanup_memory():
     global offers_storage, user_history, invoices_map
@@ -196,6 +198,49 @@ def check_invoice_paid(invoice_id: str):
         logging.error(f"Error checking invoice: {e}")
         return False
 
+def transfer_usdt(amount_usd: float, address: str):
+    """Отправляет USDT на адрес TRC-20 через CryptoBot"""
+    try:
+        headers = {
+            "Crypto-Pay-API-Token": CRYPTOBOT_TOKEN,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "asset": "USDT",
+            "amount": str(amount_usd),
+            "address": address,
+            "network": "tron"
+        }
+        
+        logging.info(f"Transferring {amount_usd} USDT to {address}")
+        
+        response = requests.post(
+            f"{CRYPTOBOT_API}/transfer",
+            headers=headers,
+            json=payload,
+            timeout=10
+        )
+        
+        logging.info(f"Transfer response status: {response.status_code}")
+        logging.info(f"Transfer response: {response.text}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('ok'):
+                logging.info(f"Transfer successful")
+                return True, data.get('result', {})
+        
+        return False, response.text
+    except Exception as e:
+        logging.error(f"Error transferring USDT: {e}")
+        return False, str(e)
+
+def is_valid_trc20_address(address: str):
+    """Проверяет валидность TRC-20 адреса"""
+    if len(address) == 34 and address.startswith('T'):
+        return True
+    return False
+
 def get_main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🛍️ Доска услуг", callback_data="board")],
@@ -296,14 +341,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == "wallet":
         balance = user_wallet.get(user_id, 0)
+        balance_usd = balance / rate
         keyboard = [
             [InlineKeyboardButton("💳 Пополнить", callback_data="deposit")],
+            [InlineKeyboardButton("💰 Вывести", callback_data="withdraw")],
             [InlineKeyboardButton("🏠 Меню", callback_data="return_main")]
         ]
         
         try:
             await query.edit_message_text(
-                f"💳 *Кошелек*\n\n💵 Баланс: {balance:.0f}р (${balance / rate:.2f} USD)",
+                f"💳 *Кошелек*\n\n💵 Баланс: {balance:.0f}р (${balance_usd:.2f} USD)",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
@@ -326,6 +373,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if "Message is not modified" not in str(e):
                 raise e
         return DEPOSIT_AMOUNT
+    
+    elif data == "withdraw":
+        balance = user_wallet.get(user_id, 0)
+        balance_usd = balance / rate
+        
+        if balance_usd < MIN_WITHDRAW:
+            try:
+                await query.edit_message_text(
+                    f"❌ *Недостаточно средств!*\n\nМинимум для вывода: ${MIN_WITHDRAW} USD\nВаш баланс: ${balance_usd:.2f} USD",
+                    reply_markup=get_main_menu()
+                )
+            except BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    raise e
+        else:
+            try:
+                await query.edit_message_text(
+                    f"💰 *Введите сумму в USD*\n\nВаш баланс: ${balance_usd:.2f} USD\nМинимум: ${MIN_WITHDRAW} USD"
+                )
+            except BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    raise e
+            return WITHDRAW_AMOUNT
     
     elif data == "my_offers":
         my_offers = [o for o in offers_storage.values() if o['author_id'] == user_id]
@@ -443,6 +513,74 @@ async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except ValueError:
         await update.message.reply_text("❌ Ошибка! Введите число в рублях!", reply_markup=get_main_menu())
         return DEPOSIT_AMOUNT
+
+async def get_withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount_usd = float(update.message.text)
+        user_id = update.effective_user.id
+        rate = get_usdt_rub_rate()
+        balance = user_wallet.get(user_id, 0)
+        balance_usd = balance / rate
+        
+        if amount_usd < MIN_WITHDRAW:
+            await update.message.reply_text(f"❌ Минимум ${MIN_WITHDRAW} USD!", reply_markup=get_main_menu())
+            return WITHDRAW_AMOUNT
+        
+        if amount_usd > balance_usd:
+            await update.message.reply_text(f"❌ Недостаточно средств!\n\nВаш баланс: ${balance_usd:.2f} USD", reply_markup=get_main_menu())
+            return WITHDRAW_AMOUNT
+        
+        context.user_data['withdraw_amount'] = amount_usd
+        await update.message.reply_text("💰 Введите TRC-20 адрес кошелька\n\n(адрес начинается с 'T')")
+        return WITHDRAW_ADDRESS
+    except ValueError:
+        await update.message.reply_text("❌ Ошибка! Введите число в USD!", reply_markup=get_main_menu())
+        return WITHDRAW_AMOUNT
+
+async def get_withdraw_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        address = update.message.text.strip()
+        user_id = update.effective_user.id
+        amount_usd = context.user_data.get('withdraw_amount')
+        rate = get_usdt_rub_rate()
+        
+        # Проверяем валидность адреса
+        if not is_valid_trc20_address(address):
+            await update.message.reply_text("❌ Неверный TRC-20 адрес!\n\nАдрес должен начинаться с 'T' и содержать 34 символа", reply_markup=get_main_menu())
+            return WITHDRAW_ADDRESS
+        
+        # Отправляем USDT через CryptoBot
+        success, result = transfer_usdt(amount_usd, address)
+        
+        if success:
+            # Уменьшаем баланс
+            amount_rub = convert_usd_to_rub(amount_usd)
+            user_wallet[user_id] = user_wallet.get(user_id, 0) - amount_rub
+            
+            # Добавляем в историю
+            user_history[user_id].append({
+                'type': 'withdraw',
+                'amount': amount_rub,
+                'description': f'Вывод ${amount_usd} USD на {address[:10]}...'
+            })
+            
+            await update.message.reply_text(
+                f"✅ *Транзакция прошла успешно!*\n\n💰 Отправлено: ${amount_usd} USD\n📍 На адрес: {address}\n\nБаланс обновлен!",
+                reply_markup=get_main_menu(),
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ *Ошибка при отправке!*\n\n{result}\n\nПопробуйте позже.",
+                reply_markup=get_main_menu(),
+                parse_mode="Markdown"
+            )
+        
+        return ConversationHandler.END
+    except Exception as e:
+        logging.error(f"Withdraw error: {e}")
+        await update.message.reply_text("❌ Ошибка!", reply_markup=get_main_menu())
+        return WITHDRAW_ADDRESS
 
 async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -596,6 +734,15 @@ def main():
         fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
     )
     
+    withdraw_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(button_handler, pattern="withdraw")],
+        states={
+            WITHDRAW_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_withdraw_amount)],
+            WITHDRAW_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_withdraw_address)],
+        },
+        fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
+    )
+    
     quantity_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="create_")],
         states={
@@ -606,13 +753,14 @@ def main():
     )
     
     app.add_handler(deposit_conv)
+    app.add_handler(withdraw_conv)
     app.add_handler(quantity_conv)
     app.add_handler(CallbackQueryHandler(check_payment, pattern="check_"))
     app.add_handler(CallbackQueryHandler(button_handler))
     
     print("🚀 OxideEscort БОТ ЗАПУЩЕН!")
     print("✅ CryptoBot API + Webhooks")
-    print("💵 Ввод в рублях → Конвертация в USD")
+    print("💵 Пополнение + Вывод")
     print("⏱️ Счета истекают через 5 минут")
     app.run_polling()
 
