@@ -1,7 +1,7 @@
 import logging
 import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, PreCheckoutQueryHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters, ContextTypes
 from datetime import datetime
 import config
 import asyncio
@@ -29,6 +29,10 @@ offer_counter = 1
 user_wallet = {}
 user_ratings = {}
 user_history = {}
+invoices_map = {}
+
+CRYPTOBOT_API = "https://pay.crypt.bot/api"
+CRYPTOBOT_TOKEN = config.CRYPTO_BOT_TOKEN
 
 def cleanup_memory():
     global offers_storage, user_history
@@ -49,6 +53,73 @@ def get_usdt_rub_rate():
 def convert_usd_to_rub(amount_usd):
     rate = get_usdt_rub_rate()
     return round(amount_usd * rate, 2)
+
+def create_cryptobot_invoice(amount_usd: float, description: str, user_id: int):
+    """Создаёт счёт через CryptoBot API"""
+    try:
+        headers = {
+            "Crypto-Pay-API-Token": CRYPTOBOT_TOKEN,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "amount": str(amount_usd),
+            "asset": "USDT",
+            "description": description,
+            "success_url": "https://t.me/oxide_escort_bot"
+        }
+        
+        response = requests.post(
+            f"{CRYPTOBOT_API}/createInvoice",
+            headers=headers,
+            json=payload,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('ok'):
+                invoice = data.get('result', {})
+                invoice_id = invoice.get('invoice_id')
+                pay_url = invoice.get('pay_url')
+                
+                invoices_map[invoice_id] = {
+                    'user_id': user_id,
+                    'amount_usd': amount_usd,
+                    'status': 'pending',
+                    'created_at': datetime.now()
+                }
+                
+                return pay_url, invoice_id
+        return None, None
+    except Exception as e:
+        logging.error(f"Error creating invoice: {e}")
+        return None, None
+
+def check_invoice_paid(invoice_id: str):
+    """Проверяет статус счёта"""
+    try:
+        headers = {
+            "Crypto-Pay-API-Token": CRYPTOBOT_TOKEN,
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.get(
+            f"{CRYPTOBOT_API}/getInvoices?invoice_ids={invoice_id}",
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('ok'):
+                invoices = data.get('result', {}).get('items', [])
+                if invoices:
+                    invoice = invoices[0]
+                    return invoice.get('status') == 'paid'
+        return False
+    except Exception as e:
+        logging.error(f"Error checking invoice: {e}")
+        return False
 
 def get_main_menu():
     return InlineKeyboardMarkup([
@@ -215,56 +286,71 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amount_usd = float(update.message.text)
+        user_id = update.effective_user.id
         
         if amount_usd < 1:
             await update.message.reply_text("❌ Минимум $1 USD!", reply_markup=get_main_menu())
             return DEPOSIT_AMOUNT
         
-        context.user_data['payment_amount_usd'] = amount_usd
-        await start_payment(update, context, int(amount_usd))
-        return ConversationHandler.END
+        pay_url, invoice_id = create_cryptobot_invoice(amount_usd, f"Пополнение OxideEscort", user_id)
+        
+        if pay_url:
+            keyboard = [
+                [InlineKeyboardButton("💳 Оплатить", url=pay_url)],
+                [InlineKeyboardButton("✅ Проверить платеж", callback_data=f"check_{invoice_id}")],
+                [InlineKeyboardButton("🏠 Меню", callback_data="return_main")]
+            ]
+            
+            rate = get_usdt_rub_rate()
+            amount_rub = convert_usd_to_rub(amount_usd)
+            
+            await update.message.reply_text(
+                f"💳 *Счет создан!*\n\n💰 ${amount_usd} USD (≈{amount_rub:.0f}р)\n\nНажми кнопку ниже для оплаты через CryptoBot",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            return ConversationHandler.END
+        else:
+            await update.message.reply_text("❌ Ошибка создания счета!", reply_markup=get_main_menu())
+            return DEPOSIT_AMOUNT
     except:
         await update.message.reply_text("❌ Ошибка! Введите число!", reply_markup=get_main_menu())
         return DEPOSIT_AMOUNT
 
-async def start_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, amount_usd: int):
-    user_id = update.effective_user.id
-    amount_cents = amount_usd * 100
+async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     
-    prices = [LabeledPrice(label=f"${amount_usd} USD", amount=amount_cents)]
+    callback_data = query.data
+    invoice_id = callback_data.replace("check_", "")
     
-    await context.bot.send_invoice(
-        chat_id=user_id,
-        title="Пополнение баланса OxideEscort",
-        description=f"Пополнение на ${amount_usd} USD",
-        payload=f"payload_{user_id}_{amount_usd}",
-        provider_token=config.CRYPTO_BOT_TOKEN,
-        currency="USD",
-        prices=prices,
-        start_parameter="test"
-    )
-
-async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.pre_checkout_query
-    await query.answer(ok=True)
-
-async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    amount_usd = update.message.successful_payment.total_amount / 100
-    amount_rub = convert_usd_to_rub(amount_usd)
-    
-    user_wallet[user_id] = user_wallet.get(user_id, 0) + amount_rub
-    user_history[user_id].append({
-        'type': 'deposit',
-        'amount': amount_rub,
-        'description': f'Платеж ${amount_usd} USD'
-    })
-    
-    await update.message.reply_text(
-        f"✅ *Платеж успешен!*\n\n💰 +${amount_usd} USD\n💵 +{amount_rub:.0f}р\n🆔 ID: {update.message.successful_payment.telegram_payment_charge_id}",
-        reply_markup=get_main_menu(),
-        parse_mode="Markdown"
-    )
+    if invoice_id in invoices_map:
+        is_paid = check_invoice_paid(invoice_id)
+        
+        if is_paid:
+            invoice = invoices_map[invoice_id]
+            user_id = invoice['user_id']
+            amount_usd = invoice['amount_usd']
+            amount_rub = convert_usd_to_rub(amount_usd)
+            
+            user_wallet[user_id] = user_wallet.get(user_id, 0) + amount_rub
+            user_history[user_id].append({
+                'type': 'deposit',
+                'amount': amount_rub,
+                'description': f'Платеж ${amount_usd} USD'
+            })
+            
+            invoices_map[invoice_id]['status'] = 'paid'
+            
+            await query.edit_message_text(
+                f"✅ *Платеж успешен!*\n\n💰 +${amount_usd} USD\n💵 +{amount_rub:.0f}р",
+                reply_markup=get_main_menu()
+            )
+        else:
+            await query.edit_message_text(
+                "⏳ *Платеж еще не поступил*\n\nПожалуйста подождите или проверьте позже",
+                reply_markup=get_main_menu()
+            )
 
 async def get_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -352,12 +438,11 @@ def main():
     
     app.add_handler(deposit_conv)
     app.add_handler(quantity_conv)
-    app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
+    app.add_handler(CallbackQueryHandler(check_payment, pattern="check_"))
     app.add_handler(CallbackQueryHandler(button_handler))
     
     print("🚀 OxideEscort БОТ ЗАПУЩЕН!")
-    print("✅ Ввод суммы пополнения")
+    print("✅ CryptoBot API для платежей")
     print("💵 USDT USD + РУБ")
     app.run_polling()
 
