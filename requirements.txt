@@ -1,4 +1,2 @@
-@"
 python-telegram-bot==21.11.1
 requests==2.31.0
-"@ | Set-Content requirements.txt -Encoding UTF8 -NoNewline
