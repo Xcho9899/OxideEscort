@@ -67,10 +67,13 @@ def create_cryptobot_invoice(amount_usd: float, description: str, user_id: int):
         }
         payload = {
             "amount": str(amount_usd),
+            "currency_type": "fiat",
             "asset": "USDT",
             "description": description,
-            "success_url": "https://t.me/oxide_escort_bot"
+            "expires_in": 3600
         }
+        
+        logging.info(f"Creating invoice: {payload}")
         
         response = requests.post(
             f"{CRYPTOBOT_API}/createInvoice",
@@ -78,6 +81,9 @@ def create_cryptobot_invoice(amount_usd: float, description: str, user_id: int):
             json=payload,
             timeout=10
         )
+        
+        logging.info(f"Response status: {response.status_code}")
+        logging.info(f"Response: {response.text}")
         
         if response.status_code == 200:
             data = response.json()
@@ -93,6 +99,7 @@ def create_cryptobot_invoice(amount_usd: float, description: str, user_id: int):
                     'created_at': datetime.now()
                 }
                 
+                logging.info(f"Invoice created: {invoice_id}")
                 return pay_url, invoice_id
         return None, None
     except Exception as e:
