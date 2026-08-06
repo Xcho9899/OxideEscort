@@ -4,6 +4,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters, ContextTypes
 from datetime import datetime
 import config
+import asyncio
 
 logging.basicConfig(level=logging.INFO)
 
@@ -28,6 +29,15 @@ offer_counter = 1
 user_wallet = {}
 user_ratings = {}
 user_history = {}
+
+def cleanup_memory():
+    global offers_storage, user_history
+    if len(user_history) > 500:
+        user_history.clear()
+    if len(offers_storage) > 100:
+        old_offers = list(offers_storage.keys())[:-50]
+        for key in old_offers:
+            del offers_storage[key]
 
 def get_usdt_rub_rate():
     try:
@@ -60,6 +70,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in user_history:
         user_history[user_id] = []
     
+    cleanup_memory()
+    
     await update.message.reply_text(
         "👋 *OxideEscort - Маркетплейс услуг*\n\n🎮 Oxide Survival Island\n💵 USDT TRC-20\n💰 Комиссия 5%",
         reply_markup=get_main_menu(),
@@ -75,6 +87,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
     rate = get_usdt_rub_rate()
+    
+    cleanup_memory()
     
     if data == "board":
         keyboard = []
@@ -296,11 +310,9 @@ def main():
     app.add_handler(quantity_conv)
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    print("🚀 OxideEscort БОТ ПОЛНЫЙ ЗАПУЩЕН!")
-    print("✅ Доска услуг - 9 категорий")
+    print("🚀 OxideEscort БОТ ЗАПУЩЕН!")
+    print("✅ Автоудаление старых сообщений")
     print("💵 USDT TRC-20")
-    print("👤 Мои предложения")
-    print("💰 Комиссия 5%")
     app.run_polling()
 
 if __name__ == '__main__':
