@@ -1,5 +1,8 @@
 import logging
 import requests
+import threading
+import os
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters, ContextTypes
 from telegram.error import BadRequest
@@ -8,6 +11,13 @@ import config
 import asyncio
 
 logging.basicConfig(level=logging.INFO)
+
+# Flask app для PORT
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def hello():
+    return 'OxideEscort Bot is running!', 200
 
 AD_QUANTITY, AD_PRICE = range(2)
 DEPOSIT_AMOUNT = 2
@@ -486,7 +496,18 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
+def run_flask():
+    """Запуск Flask в отдельном потоке"""
+    port = int(os.environ.get('PORT', 8080))
+    flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
 def main():
+    # Запуск Flask в фоновом потоке
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    print(f"🌐 Flask запущен на порту {os.environ.get('PORT', 8080)}")
+    
+    # Основной бот
     app = Application.builder().token(config.TELEGRAM_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
