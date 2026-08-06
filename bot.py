@@ -1,7 +1,7 @@
 import logging
 import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, PreCheckoutQueryHandler, filters, ContextTypes
 from datetime import datetime
 import config
 import asyncio
@@ -135,7 +135,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "wallet":
         balance = user_wallet.get(user_id, 0)
         keyboard = [
-            [InlineKeyboardButton("💵 Пополнить", callback_data="deposit")],
+            [InlineKeyboardButton("💳 Пополнить", callback_data="deposit")],
             [InlineKeyboardButton("🏠 Меню", callback_data="return_main")]
         ]
         
@@ -146,8 +146,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif data == "deposit":
-        await query.edit_message_text("💵 Введите сумму в РУБЛЯХ:")
-        return DEPOSIT_AMOUNT
+        keyboard = [
+            [InlineKeyboardButton("💳 Оплатить 10 USDT", callback_data="pay_10usdt")],
+            [InlineKeyboardButton("💳 Оплатить 50 USDT", callback_data="pay_50usdt")],
+            [InlineKeyboardButton("💳 Оплатить 100 USDT", callback_data="pay_100usdt")],
+            [InlineKeyboardButton("🏠 Меню", callback_data="return_main")]
+        ]
+        await query.edit_message_text(
+            "💵 *Выбери сумму:*",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+    
+    elif data.startswith("pay_"):
+        amount_str = data.replace("pay_", "").replace("usdt", "")
+        amount_usd = int(amount_str)
+        context.user_data['payment_amount_usd'] = amount_usd
+        
+        await start_payment(update, context, amount_usd)
     
     elif data == "my_offers":
         my_offers = [o for o in offers_storage.values() if o['author_id'] == user_id]
@@ -204,23 +220,44 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "return_main":
         await query.edit_message_text("🎯 *Меню*", reply_markup=get_main_menu(), parse_mode="Markdown")
 
-async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        amount_rub = float(update.message.text)
-        user_id = update.effective_user.id
-        
-        if amount_rub < 81:
-            await update.message.reply_text("❌ Минимум 81р", reply_markup=get_main_menu())
-            return DEPOSIT_AMOUNT
-        
-        user_wallet[user_id] = user_wallet.get(user_id, 0) + amount_rub
-        user_history[user_id].append({'type': 'deposit', 'amount': amount_rub, 'description': 'Пополнение'})
-        
-        await update.message.reply_text(f"✅ Баланс пополнен на {amount_rub:.0f}р!", reply_markup=get_main_menu())
-        return ConversationHandler.END
-    except:
-        await update.message.reply_text("❌ Ошибка!", reply_markup=get_main_menu())
-        return DEPOSIT_AMOUNT
+async def start_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, amount_usd: int):
+    user_id = update.effective_user.id
+    amount_cents = amount_usd * 100
+    
+    prices = [LabeledPrice(label=f"{amount_usd} USDT", amount=amount_cents)]
+    
+    await context.bot.send_invoice(
+        chat_id=user_id,
+        title="Пополнение баланса OxideEscort",
+        description=f"Пополнение на {amount_usd} USDT",
+        payload=f"payload_{user_id}_{amount_usd}",
+        provider_token=config.CRYPTO_BOT_TOKEN,
+        currency="XTR",
+        prices=prices,
+        start_parameter="test"
+    )
+
+async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.pre_checkout_query
+    await query.answer(ok=True)
+
+async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    amount_usd = update.message.successful_payment.total_amount / 100
+    amount_rub = convert_usd_to_rub(amount_usd)
+    
+    user_wallet[user_id] = user_wallet.get(user_id, 0) + amount_rub
+    user_history[user_id].append({
+        'type': 'deposit',
+        'amount': amount_rub,
+        'description': f'Платеж {amount_usd} USDT'
+    })
+    
+    await update.message.reply_text(
+        f"✅ *Платеж успешен!*\n\n💰 +{amount_rub:.0f}р ({amount_usd} USDT)\n🆔 ID: {update.message.successful_payment.telegram_payment_charge_id}",
+        reply_markup=get_main_menu(),
+        parse_mode="Markdown"
+    )
 
 async def get_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -289,14 +326,6 @@ def main():
     
     app.add_handler(CommandHandler("start", start))
     
-    deposit_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern="deposit")],
-        states={
-            DEPOSIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_deposit_amount)],
-        },
-        fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
-    )
-    
     quantity_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="create_")],
         states={
@@ -306,12 +335,13 @@ def main():
         fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
     )
     
-    app.add_handler(deposit_conv)
     app.add_handler(quantity_conv)
+    app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(CallbackQueryHandler(button_handler))
     
     print("🚀 OxideEscort БОТ ЗАПУЩЕН!")
-    print("✅ Автоудаление старых сообщений")
+    print("✅ Реальные платежи через CryptoBot")
     print("💵 USDT TRC-20")
     app.run_polling()
 
