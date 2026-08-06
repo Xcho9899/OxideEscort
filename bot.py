@@ -2,13 +2,14 @@ import logging
 import requests
 import threading
 import os
-from flask import Flask
+from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters, ContextTypes
 from telegram.error import BadRequest
 from datetime import datetime
 import config
 import asyncio
+import json
 
 logging.basicConfig(level=logging.INFO)
 
@@ -18,6 +19,46 @@ flask_app = Flask(__name__)
 @flask_app.route('/')
 def hello():
     return 'OxideEscort Bot is running!', 200
+
+@flask_app.route('/webhook/cryptobot', methods=['POST'])
+def webhook_cryptobot():
+    """Обработчик вебхуков от CryptoBot"""
+    try:
+        data = request.get_json()
+        logging.info(f"Webhook received: {data}")
+        
+        # Проверяем есть ли информация об оплате
+        if 'update_id' in data:
+            # CryptoBot format
+            result = data.get('update')
+            if result and 'invoice_id' in result:
+                invoice_id = result.get('invoice_id')
+                status = result.get('status')
+                
+                logging.info(f"Invoice {invoice_id} status: {status}")
+                
+                # Если платеж прошел
+                if status == 'paid' and invoice_id in invoices_map:
+                    invoice = invoices_map[invoice_id]
+                    user_id = invoice['user_id']
+                    amount_usd = invoice['amount_usd']
+                    amount_rub = convert_usd_to_rub(amount_usd)
+                    
+                    # Пополняем баланс
+                    user_wallet[user_id] = user_wallet.get(user_id, 0) + amount_rub
+                    user_history[user_id].append({
+                        'type': 'deposit',
+                        'amount': amount_rub,
+                        'description': f'Платеж ${amount_usd} USD'
+                    })
+                    
+                    invoices_map[invoice_id]['status'] = 'paid'
+                    logging.info(f"Payment confirmed for user {user_id}: +{amount_rub}р")
+        
+        return jsonify({'ok': True}), 200
+    except Exception as e:
+        logging.error(f"Webhook error: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 AD_QUANTITY, AD_PRICE = range(2)
 DEPOSIT_AMOUNT = 2
@@ -427,7 +468,7 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             try:
                 await query.edit_message_text(
-                    "⏳ *Платеж еще не поступил*\n\nПожалуйста подождите или проверьте позже",
+                    "⏳ *Платеж еще не поступил или уже был обработан вебхуком*\n\nПроверьте баланс в меню Кошелек!",
                     reply_markup=get_main_menu()
                 )
             except BadRequest as e:
@@ -535,7 +576,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     
     print("🚀 OxideEscort БОТ ЗАПУЩЕН!")
-    print("✅ CryptoBot API для платежей")
+    print("✅ CryptoBot API + Webhooks")
     print("💵 Ввод в рублях → Конвертация в USD")
     app.run_polling()
 
