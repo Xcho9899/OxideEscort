@@ -85,7 +85,7 @@ invoices_map = {}
 CRYPTOBOT_API = "https://pay.crypt.bot/api"
 CRYPTOBOT_TOKEN = config.CRYPTO_BOT_TOKEN
 INVOICE_TIMEOUT = 300  # 5 минут в секундах
-MIN_WITHDRAW = 5  # Минимум для вывода $5
+MIN_WITHDRAW = 1  # Минимум для вывода $1
 
 def cleanup_memory():
     global offers_storage, user_history, invoices_map
