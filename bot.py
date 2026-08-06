@@ -5,7 +5,6 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Conv
 from datetime import datetime
 import config
 import asyncio
-import os
 
 logging.basicConfig(level=logging.INFO)
 
@@ -456,10 +455,6 @@ def main():
     print("🚀 OxideEscort БОТ ЗАПУЩЕН!")
     print("✅ CryptoBot API для платежей")
     print("💵 Ввод в рублях → Конвертация в USD")
-    
-    port = int(os.environ.get('PORT', 8080))
-    print(f"🔌 Порт: {port}")
-    
     app.run_polling()
 
 if __name__ == '__main__':
