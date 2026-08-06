@@ -54,6 +54,10 @@ def convert_usd_to_rub(amount_usd):
     rate = get_usdt_rub_rate()
     return round(amount_usd * rate, 2)
 
+def convert_rub_to_usd(amount_rub):
+    rate = get_usdt_rub_rate()
+    return round(amount_rub / rate, 2)
+
 def create_cryptobot_invoice(amount_usd: float, description: str, user_id: int):
     """Создаёт счёт через CryptoBot API"""
     try:
@@ -222,7 +226,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🏠 Меню", callback_data="return_main")]
         ]
         await query.edit_message_text(
-            f"💵 *Введите сумму в USD*\n\nТекущий курс: 1 USD = {rate:.2f}р",
+            f"💵 *Введите сумму в РУБЛЯХ*\n\nТекущий курс: 1 USD = {rate:.2f}р",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
@@ -275,7 +279,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == "help":
         await query.edit_message_text(
-            "❓ *Справка*\n\n1. Найди услугу\n2. Пополни баланс\n3. Создай предложение\n\n💰 Комиссия 5%\n💵 USDT USD",
+            "❓ *Справка*\n\n1. Найди услугу\n2. Пополни баланс в рублях\n3. Создай предложение\n\n💰 Комиссия 5%\n💵 USDT USD",
             reply_markup=get_main_menu(),
             parse_mode="Markdown"
         )
@@ -285,27 +289,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        amount_usd = float(update.message.text)
+        amount_rub = float(update.message.text)
         user_id = update.effective_user.id
+        rate = get_usdt_rub_rate()
         
-        if amount_usd < 1:
-            await update.message.reply_text("❌ Минимум $1 USD!", reply_markup=get_main_menu())
+        if amount_rub < 81:
+            await update.message.reply_text("❌ Минимум 81р (~$1 USD)!", reply_markup=get_main_menu())
             return DEPOSIT_AMOUNT
+        
+        amount_usd = convert_rub_to_usd(amount_rub)
         
         pay_url, invoice_id = create_cryptobot_invoice(amount_usd, f"Пополнение OxideEscort", user_id)
         
         if pay_url:
             keyboard = [
-                [InlineKeyboardButton("💳 Оплатить", url=pay_url)],
+                [InlineKeyboardButton("💳 Оплатить через CryptoBot", url=pay_url)],
                 [InlineKeyboardButton("✅ Проверить платеж", callback_data=f"check_{invoice_id}")],
                 [InlineKeyboardButton("🏠 Меню", callback_data="return_main")]
             ]
             
-            rate = get_usdt_rub_rate()
-            amount_rub = convert_usd_to_rub(amount_usd)
-            
             await update.message.reply_text(
-                f"💳 *Счет создан!*\n\n💰 ${amount_usd} USD (≈{amount_rub:.0f}р)\n\nНажми кнопку ниже для оплаты через CryptoBot",
+                f"💵 *Счет создан!*\n\n📥 Вы ввели: {amount_rub:.0f}р\n📤 К оплате: ${amount_usd} USD\n📊 Курс: 1 USD = {rate:.2f}р\n\nНажми 'Оплатить' для перевода через CryptoBot",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
@@ -313,8 +317,8 @@ async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE)
         else:
             await update.message.reply_text("❌ Ошибка создания счета!", reply_markup=get_main_menu())
             return DEPOSIT_AMOUNT
-    except:
-        await update.message.reply_text("❌ Ошибка! Введите число!", reply_markup=get_main_menu())
+    except ValueError:
+        await update.message.reply_text("❌ Ошибка! Введите число в рублях!", reply_markup=get_main_menu())
         return DEPOSIT_AMOUNT
 
 async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -443,7 +447,7 @@ def main():
     
     print("🚀 OxideEscort БОТ ЗАПУЩЕН!")
     print("✅ CryptoBot API для платежей")
-    print("💵 USDT USD + РУБ")
+    print("💵 Ввод в рублях → Конвертация в USD")
     app.run_polling()
 
 if __name__ == '__main__':
