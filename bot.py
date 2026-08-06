@@ -2,6 +2,7 @@ import logging
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters, ContextTypes
+from telegram.error import BadRequest
 from datetime import datetime
 import config
 import asyncio
@@ -179,11 +180,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton(f"{name} ({count})", callback_data=f"cat_{key}")])
         keyboard.append([InlineKeyboardButton("🏠 Меню", callback_data="return_main")])
         
-        await query.edit_message_text(
-            "🛍️ *Доска услуг*\n\nВыберите категорию:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
+        try:
+            await query.edit_message_text(
+                "🛍️ *Доска услуг*\n\nВыберите категорию:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise e
     
     elif data.startswith("cat_"):
         category = data.replace("cat_", "")
@@ -191,7 +196,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if not offers:
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="board")]]
-            await query.edit_message_text("📭 Предложений нет", reply_markup=InlineKeyboardMarkup(keyboard))
+            try:
+                await query.edit_message_text("📭 Предложений нет", reply_markup=InlineKeyboardMarkup(keyboard))
+            except BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    raise e
         else:
             keyboard = []
             for offer in offers:
@@ -202,16 +211,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )])
             keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="board")])
             
-            await query.edit_message_text(
-                f"📊 *{CATEGORIES[category]}*",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
-            )
+            try:
+                await query.edit_message_text(
+                    f"📊 *{CATEGORIES[category]}*",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+            except BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    raise e
     
     elif data.startswith("create_"):
         category = data.replace("create_", "")
         context.user_data['category'] = category
-        await query.edit_message_text(f"📊 Введите количество для {CATEGORIES[category]}")
+        try:
+            await query.edit_message_text(f"📊 Введите количество для {CATEGORIES[category]}")
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise e
         return AD_QUANTITY
     
     elif data == "wallet":
@@ -221,22 +238,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🏠 Меню", callback_data="return_main")]
         ]
         
-        await query.edit_message_text(
-            f"💳 *Кошелек*\n\n💵 Баланс: {balance:.0f}р (${balance / rate:.2f} USD)",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
+        try:
+            await query.edit_message_text(
+                f"💳 *Кошелек*\n\n💵 Баланс: {balance:.0f}р (${balance / rate:.2f} USD)",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise e
     
     elif data == "deposit":
         rate = get_usdt_rub_rate()
         keyboard = [
             [InlineKeyboardButton("🏠 Меню", callback_data="return_main")]
         ]
-        await query.edit_message_text(
-            f"💵 *Введите сумму в РУБЛЯХ*\n\nТекущий курс: 1 USD = {rate:.2f}р",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
+        try:
+            await query.edit_message_text(
+                f"💵 *Введите сумму в РУБЛЯХ*\n\nТекущий курс: 1 USD = {rate:.2f}р",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise e
         return DEPOSIT_AMOUNT
     
     elif data == "my_offers":
@@ -255,10 +280,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton(f"➕ {name}", callback_data=f"create_{key}")])
         keyboard.append([InlineKeyboardButton("🏠 Меню", callback_data="return_main")])
         
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        try:
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise e
     
     elif data == "my_deals":
-        await query.edit_message_text("📋 У вас нет сделок", reply_markup=get_main_menu())
+        try:
+            await query.edit_message_text("📋 У вас нет сделок", reply_markup=get_main_menu())
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise e
     
     elif data == "profile":
         rating_data = user_ratings.get(user_id, {})
@@ -266,33 +299,53 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         my_offers_count = len([o for o in offers_storage.values() if o['author_id'] == user_id])
         deals_count = rating_data.get('deals', 0)
         
-        await query.edit_message_text(
-            f"👤 *Профиль*\n\n⭐ Рейтинг: {avg_rating:.1f}/5\n📊 Сделок: {deals_count}\n📋 Предложений: {my_offers_count}",
-            reply_markup=get_main_menu(),
-            parse_mode="Markdown"
-        )
+        try:
+            await query.edit_message_text(
+                f"👤 *Профиль*\n\n⭐ Рейтинг: {avg_rating:.1f}/5\n📊 Сделок: {deals_count}\n📋 Предложений: {my_offers_count}",
+                reply_markup=get_main_menu(),
+                parse_mode="Markdown"
+            )
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise e
     
     elif data == "history":
         transactions = user_history.get(user_id, [])
         
         if not transactions:
-            await query.edit_message_text("📜 История пуста", reply_markup=get_main_menu())
+            try:
+                await query.edit_message_text("📜 История пуста", reply_markup=get_main_menu())
+            except BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    raise e
         else:
             text = "📜 *История:*\n\n"
             for trans in transactions[-10:]:
                 text += f"💰 {trans['description']}\n"
             
-            await query.edit_message_text(text, reply_markup=get_main_menu(), parse_mode="Markdown")
+            try:
+                await query.edit_message_text(text, reply_markup=get_main_menu(), parse_mode="Markdown")
+            except BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    raise e
     
     elif data == "help":
-        await query.edit_message_text(
-            "❓ *Справка*\n\n1. Найди услугу\n2. Пополни баланс в рублях\n3. Создай предложение\n\n💰 Комиссия 5%\n💵 USDT USD",
-            reply_markup=get_main_menu(),
-            parse_mode="Markdown"
-        )
+        try:
+            await query.edit_message_text(
+                "❓ *Справка*\n\n1. Найди услугу\n2. Пополни баланс в рублях\n3. Создай предложение\n\n💰 Комиссия 5%\n💵 USDT USD",
+                reply_markup=get_main_menu(),
+                parse_mode="Markdown"
+            )
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise e
     
     elif data == "return_main":
-        await query.edit_message_text("🎯 *Меню*", reply_markup=get_main_menu(), parse_mode="Markdown")
+        try:
+            await query.edit_message_text("🎯 *Меню*", reply_markup=get_main_menu(), parse_mode="Markdown")
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise e
 
 async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -353,15 +406,23 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             invoices_map[invoice_id]['status'] = 'paid'
             
-            await query.edit_message_text(
-                f"✅ *Платеж успешен!*\n\n💰 +${amount_usd} USD\n💵 +{amount_rub:.0f}р",
-                reply_markup=get_main_menu()
-            )
+            try:
+                await query.edit_message_text(
+                    f"✅ *Платеж успешен!*\n\n💰 +${amount_usd} USD\n💵 +{amount_rub:.0f}р",
+                    reply_markup=get_main_menu()
+                )
+            except BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    raise e
         else:
-            await query.edit_message_text(
-                "⏳ *Платеж еще не поступил*\n\nПожалуйста подождите или проверьте позже",
-                reply_markup=get_main_menu()
-            )
+            try:
+                await query.edit_message_text(
+                    "⏳ *Платеж еще не поступил*\n\nПожалуйста подождите или проверьте позже",
+                    reply_markup=get_main_menu()
+                )
+            except BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    raise e
 
 async def get_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
