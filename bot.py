@@ -27,21 +27,18 @@ def webhook_cryptobot():
         data = request.get_json()
         logging.info(f"Webhook received: {data}")
         
-        # Проверяем есть ли информация об оплате
-        if 'update_id' in data:
-            # CryptoBot format
-            result = data.get('update')
-            if result and 'invoice_id' in result:
-                invoice_id = result.get('invoice_id')
-                status = result.get('status')
-                
-                logging.info(f"Invoice {invoice_id} status: {status}")
-                
-                # Если платеж прошел
-                if status == 'paid' and invoice_id in invoices_map:
-                    invoice = invoices_map[invoice_id]
-                    user_id = invoice['user_id']
-                    amount_usd = invoice['amount_usd']
+        payload = data.get('payload', {})
+        
+        if payload and payload.get('status') == 'paid':
+            invoice_id = payload.get('invoice_id')
+            
+            logging.info(f"Invoice {invoice_id} paid!")
+            
+            # Ищем счет в нашей памяти
+            for inv_id, inv_data in invoices_map.items():
+                if str(inv_id) == str(invoice_id) or inv_id == invoice_id:
+                    user_id = inv_data['user_id']
+                    amount_usd = inv_data['amount_usd']
                     amount_rub = convert_usd_to_rub(amount_usd)
                     
                     # Пополняем баланс
@@ -52,8 +49,9 @@ def webhook_cryptobot():
                         'description': f'Платеж ${amount_usd} USD'
                     })
                     
-                    invoices_map[invoice_id]['status'] = 'paid'
+                    invoices_map[inv_id]['status'] = 'paid'
                     logging.info(f"Payment confirmed for user {user_id}: +{amount_rub}р")
+                    break
         
         return jsonify({'ok': True}), 200
     except Exception as e:
