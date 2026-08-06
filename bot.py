@@ -6,7 +6,7 @@ from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters, ContextTypes
 from telegram.error import BadRequest
-from datetime import datetime
+from datetime import datetime, timedelta
 import config
 import asyncio
 import json
@@ -85,15 +85,29 @@ invoices_map = {}
 
 CRYPTOBOT_API = "https://pay.crypt.bot/api"
 CRYPTOBOT_TOKEN = config.CRYPTO_BOT_TOKEN
+INVOICE_TIMEOUT = 300  # 5 минут в секундах
 
 def cleanup_memory():
-    global offers_storage, user_history
+    global offers_storage, user_history, invoices_map
     if len(user_history) > 500:
         user_history.clear()
     if len(offers_storage) > 100:
         old_offers = list(offers_storage.keys())[:-50]
         for key in old_offers:
             del offers_storage[key]
+    
+    # Удаляем истекшие счета
+    now = datetime.now()
+    expired_invoices = []
+    for invoice_id, invoice in invoices_map.items():
+        created_at = invoice.get('created_at')
+        if created_at and (now - created_at).total_seconds() > INVOICE_TIMEOUT:
+            if invoice.get('status') != 'paid':
+                expired_invoices.append(invoice_id)
+                logging.info(f"Invoice {invoice_id} expired after 5 minutes")
+    
+    for invoice_id in expired_invoices:
+        del invoices_map[invoice_id]
 
 def get_usdt_rub_rate():
     try:
@@ -420,7 +434,7 @@ async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE)
             ]
             
             await update.message.reply_text(
-                f"💵 *Счет создан!*\n\n📥 Вы ввели: {amount_rub:.0f}р\n📤 К оплате: ${amount_usd} USD\n📊 Курс: 1 USD = {rate:.2f}р\n\nНажми 'Оплатить' для перевода через CryptoBot",
+                f"💵 *Счет создан!*\n\n📥 Вы ввели: {amount_rub:.0f}р\n📤 К оплате: ${amount_usd} USD\n📊 Курс: 1 USD = {rate:.2f}р\n⏱️ Счет действителен 5 минут\n\nНажми 'Оплатить' для перевода через CryptoBot",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
@@ -439,41 +453,64 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     callback_data = query.data
     invoice_id = callback_data.replace("check_", "")
     
-    if invoice_id in invoices_map:
-        is_paid = check_invoice_paid(invoice_id)
+    # Проверяем не истек ли счет
+    if invoice_id not in invoices_map:
+        try:
+            await query.edit_message_text(
+                "❌ *Счет истек!*\n\nВремя на оплату составляет 5 минут. Создайте новый счет.",
+                reply_markup=get_main_menu()
+            )
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise e
+        return
+    
+    invoice = invoices_map[invoice_id]
+    
+    if invoice.get('status') == 'paid':
+        try:
+            await query.edit_message_text(
+                f"✅ *Платеж уже обработан!*\n\n💰 +${invoice['amount_usd']} USD\n💵 +{convert_usd_to_rub(invoice['amount_usd']):.0f}р\n\nПроверьте баланс в Кошельке!",
+                reply_markup=get_main_menu()
+            )
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise e
+        return
+    
+    is_paid = check_invoice_paid(invoice_id)
+    
+    if is_paid:
+        user_id = invoice['user_id']
+        amount_usd = invoice['amount_usd']
+        amount_rub = convert_usd_to_rub(amount_usd)
         
-        if is_paid:
-            invoice = invoices_map[invoice_id]
-            user_id = invoice['user_id']
-            amount_usd = invoice['amount_usd']
-            amount_rub = convert_usd_to_rub(amount_usd)
-            
-            user_wallet[user_id] = user_wallet.get(user_id, 0) + amount_rub
-            user_history[user_id].append({
-                'type': 'deposit',
-                'amount': amount_rub,
-                'description': f'Платеж ${amount_usd} USD'
-            })
-            
-            invoices_map[invoice_id]['status'] = 'paid'
-            
-            try:
-                await query.edit_message_text(
-                    f"✅ *Платеж успешен!*\n\n💰 +${amount_usd} USD\n💵 +{amount_rub:.0f}р",
-                    reply_markup=get_main_menu()
-                )
-            except BadRequest as e:
-                if "Message is not modified" not in str(e):
-                    raise e
-        else:
-            try:
-                await query.edit_message_text(
-                    "⏳ *Платеж еще не поступил или уже был обработан вебхуком*\n\nПроверьте баланс в меню Кошелек!",
-                    reply_markup=get_main_menu()
-                )
-            except BadRequest as e:
-                if "Message is not modified" not in str(e):
-                    raise e
+        user_wallet[user_id] = user_wallet.get(user_id, 0) + amount_rub
+        user_history[user_id].append({
+            'type': 'deposit',
+            'amount': amount_rub,
+            'description': f'Платеж ${amount_usd} USD'
+        })
+        
+        invoices_map[invoice_id]['status'] = 'paid'
+        
+        try:
+            await query.edit_message_text(
+                f"✅ *Платеж успешен!*\n\n💰 +${amount_usd} USD\n💵 +{amount_rub:.0f}р",
+                reply_markup=get_main_menu()
+            )
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise e
+    else:
+        try:
+            await query.edit_message_text(
+                "⏳ *Платеж еще не поступил*\n\nПожалуйста подождите или проверьте позже.",
+                reply_markup=get_main_menu()
+            )
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise e
 
 async def get_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -578,6 +615,7 @@ def main():
     print("🚀 OxideEscort БОТ ЗАПУЩЕН!")
     print("✅ CryptoBot API + Webhooks")
     print("💵 Ввод в рублях → Конвертация в USD")
+    print("⏱️ Счета истекают через 5 минут")
     app.run_polling()
 
 if __name__ == '__main__':
