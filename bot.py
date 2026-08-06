@@ -1,6 +1,3 @@
-cd C:\Users\User\Desktop\OxideEscort
-
-@"
 import logging
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -31,10 +28,6 @@ offer_counter = 1
 user_wallet = {}
 user_ratings = {}
 user_history = {}
-withdrawal_requests = {}
-withdrawal_counter = 1
-deals_storage = {}
-deal_counter = 1
 
 def get_usdt_rub_rate():
     try:
@@ -42,10 +35,6 @@ def get_usdt_rub_rate():
         return response.json()['tether']['rub']
     except:
         return 81.0
-
-def convert_rub_to_usdt(amount_rub):
-    rate = get_usdt_rub_rate()
-    return round(amount_rub / rate, 2)
 
 def convert_usd_to_rub(amount_usd):
     rate = get_usdt_rub_rate()
@@ -78,7 +67,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global offer_counter, deal_counter, withdrawal_counter
+    global offer_counter
     
     query = update.callback_query
     await query.answer()
@@ -94,7 +83,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton(f"{name} ({count})", callback_data=f"cat_{key}")])
         keyboard.append([InlineKeyboardButton("🏠 Меню", callback_data="return_main")])
         
-        await query.edit_message_text("🛍️ *Доска услуг*\n\nВыберите категорию:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        await query.edit_message_text(
+            "🛍️ *Доска услуг*\n\nВыберите категорию:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
     
     elif data.startswith("cat_"):
         category = data.replace("cat_", "")
@@ -107,10 +100,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = []
             for offer in offers:
                 price_rub = convert_usd_to_rub(offer['price'])
-                keyboard.append([InlineKeyboardButton(f"💰 {offer['quantity']} {offer['unit']} = ${offer['price']} (≈{price_rub:.0f}р)", callback_data=f"offer_{offer['id']}")])
+                keyboard.append([InlineKeyboardButton(
+                    f"💰 {offer['quantity']} {offer['unit']} = ${offer['price']} (≈{price_rub:.0f}р)",
+                    callback_data=f"offer_{offer['id']}"
+                )])
             keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="board")])
             
-            await query.edit_message_text(f"📊 *{CATEGORIES[category]}*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+            await query.edit_message_text(
+                f"📊 *{CATEGORIES[category]}*",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
     
     elif data.startswith("create_"):
         category = data.replace("create_", "")
@@ -122,7 +122,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance = user_wallet.get(user_id, 0)
         keyboard = [
             [InlineKeyboardButton("💵 Пополнить", callback_data="deposit")],
-            [InlineKeyboardButton("💸 Снять", callback_data="withdraw")],
             [InlineKeyboardButton("🏠 Меню", callback_data="return_main")]
         ]
         
@@ -135,14 +134,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "deposit":
         await query.edit_message_text("💵 Введите сумму в РУБЛЯХ:")
         return DEPOSIT_AMOUNT
-    
-    elif data == "withdraw":
-        balance = user_wallet.get(user_id, 0)
-        if balance < 405:
-            await query.edit_message_text(f"❌ Минимум 405р", reply_markup=get_main_menu())
-            return
-        await query.edit_message_text("💸 Введите сумму для вывода (в РУБЛЯХ):")
-        return WITHDRAW_AMOUNT
     
     elif data == "my_offers":
         my_offers = [o for o in offers_storage.values() if o['author_id'] == user_id]
@@ -163,16 +154,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     
     elif data == "my_deals":
-        my_deals = [d for d in deals_storage.values() if d['customer_id'] == user_id or d['executor_id'] == user_id]
-        
-        if not my_deals:
-            await query.edit_message_text("📭 У вас нет сделок", reply_markup=get_main_menu())
-        else:
-            text = "📋 *Мои сделки:*\n\n"
-            for deal in my_deals:
-                text += f"📌 {CATEGORIES[deal['category']]}\n💰 {deal['price_rub']:.0f}р (${deal['price_usd']})\n\n"
-            
-            await query.edit_message_text(text, reply_markup=get_main_menu(), parse_mode="Markdown")
+        await query.edit_message_text("📋 У вас нет сделок", reply_markup=get_main_menu())
     
     elif data == "profile":
         rating_data = user_ratings.get(user_id, {})
@@ -194,14 +176,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text = "📜 *История:*\n\n"
             for trans in transactions[-10:]:
-                icon = "💰" if trans['type'] == 'deposit' else "💸"
-                text += f"{icon} {trans['description']}\n{trans['amount']:.0f}р\n\n"
+                text += f"💰 {trans['description']}\n{trans['amount']:.0f}р\n\n"
             
             await query.edit_message_text(text, reply_markup=get_main_menu(), parse_mode="Markdown")
     
     elif data == "help":
         await query.edit_message_text(
-            "❓ *Справка*\n\n1. Найди услугу\n2. Пополни баланс\n3. Оплати услугу\n\n💰 Комиссия 5%\n💵 USDT TRC-20",
+            "❓ *Справка*\n\n1. Найди услугу\n2. Пополни баланс\n3. Создай предложение\n\n💰 Комиссия 5%\n💵 USDT TRC-20",
             reply_markup=get_main_menu(),
             parse_mode="Markdown"
         )
@@ -224,7 +205,7 @@ async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"✅ Баланс пополнен на {amount_rub:.0f}р!", reply_markup=get_main_menu())
         return ConversationHandler.END
     except:
-        await update.message.reply_text("❌ Ошибка! Введите число", reply_markup=get_main_menu())
+        await update.message.reply_text("❌ Ошибка!", reply_markup=get_main_menu())
         return DEPOSIT_AMOUNT
 
 async def get_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -234,7 +215,7 @@ async def get_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("💰 Введите цену в $")
         return AD_PRICE
     except:
-        await update.message.reply_text("❌ Ошибка! Число", reply_markup=get_main_menu())
+        await update.message.reply_text("❌ Ошибка!", reply_markup=get_main_menu())
         return AD_QUANTITY
 
 async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -252,11 +233,29 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     category = context.user_data.get('category')
     quantity = context.user_data.get('quantity')
     
-    units = {"farm_sulfur": "серы", "farm_metal": "металла", "farm_wood": "дерева", "build_base": "базы", "farm_fuel": "топлива", "raid_help": "рейдов", "farm_scrap": "металалома", "install_turrets": "турелей", "hide_cabinet": "шкафов"}
+    units = {
+        "farm_sulfur": "серы",
+        "farm_metal": "металла",
+        "farm_wood": "дерева",
+        "build_base": "базы",
+        "farm_fuel": "топлива",
+        "raid_help": "рейдов",
+        "farm_scrap": "металалома",
+        "install_turrets": "турелей",
+        "hide_cabinet": "шкафов",
+    }
     unit = units.get(category, "ед")
     
     offer_id = offer_counter
-    offers_storage[offer_id] = {'id': offer_id, 'category': category, 'quantity': quantity, 'unit': unit, 'price': price, 'author_id': user_id, 'author': username}
+    offers_storage[offer_id] = {
+        'id': offer_id,
+        'category': category,
+        'quantity': quantity,
+        'unit': unit,
+        'price': price,
+        'author_id': user_id,
+        'author': username
+    }
     offer_counter += 1
     
     if user_id not in user_ratings:
@@ -278,13 +277,18 @@ def main():
     
     deposit_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="deposit")],
-        states={DEPOSIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_deposit_amount)]},
+        states={
+            DEPOSIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_deposit_amount)],
+        },
         fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
     )
     
     quantity_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="create_")],
-        states={AD_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_quantity)], AD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_price)]},
+        states={
+            AD_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_quantity)],
+            AD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_price)],
+        },
         fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
     )
     
@@ -301,4 +305,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-"@ | Set-Content bot.py
