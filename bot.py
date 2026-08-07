@@ -1,10 +1,9 @@
 import logging
 import requests
-import threading
 import os
 import json
 from flask import Flask, request, jsonify
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters, ContextTypes
 from telegram.error import BadRequest
 from datetime import datetime, timedelta
@@ -14,16 +13,28 @@ import asyncio
 logging.basicConfig(level=logging.INFO)
 
 flask_app = Flask(__name__)
+bot = Bot(token=config.TELEGRAM_TOKEN)
 
 @flask_app.route('/')
 def hello():
     return 'OxideEscort Bot is running!', 200
 
+@flask_app.route('/webhook/telegram', methods=['POST'])
+def webhook_telegram():
+    try:
+        data = request.get_json()
+        update = Update.de_json(data, bot)
+        asyncio.run(app.process_update(update))
+        return jsonify({'ok': True}), 200
+    except Exception as e:
+        logging.error(f"Telegram webhook error: {e}")
+        return jsonify({'ok': False}), 500
+
 @flask_app.route('/webhook/cryptobot', methods=['POST'])
 def webhook_cryptobot():
     try:
         data = request.get_json()
-        logging.info(f"✅ Webhook received")
+        logging.info(f"✅ CryptoBot Webhook received")
         
         payload = data.get('payload', {})
         
@@ -33,7 +44,6 @@ def webhook_cryptobot():
             
             logging.info(f"💰 Invoice {invoice_id} PAID! Amount: ${amount_usd}")
             
-            # Ищем в памяти
             found = False
             for inv_id, inv_data in list(invoices_map.items()):
                 if str(inv_id) == str(invoice_id):
@@ -43,12 +53,11 @@ def webhook_cryptobot():
                     user_history[user_id].append({'type': 'deposit', 'amount': amount_rub, 'description': f'Платеж ${amount_usd} USD'})
                     invoices_map[inv_id]['status'] = 'paid'
                     save_invoices()
-                    logging.info(f"✅✅ CONFIRMED user {user_id}: +{amount_rub}р")
                     save_invoice_user_map(invoice_id, user_id)
+                    logging.info(f"✅✅ CONFIRMED user {user_id}: +{amount_rub}р")
                     found = True
                     break
             
-            # Если не нашли в памяти - ищем в файле
             if not found:
                 user_id = load_invoice_user(invoice_id)
                 if user_id:
@@ -56,13 +65,10 @@ def webhook_cryptobot():
                     user_wallet[user_id] = user_wallet.get(user_id, 0) + amount_rub
                     user_history[user_id].append({'type': 'deposit', 'amount': amount_rub, 'description': f'Платеж ${amount_usd} USD'})
                     logging.info(f"✅ CONFIRMED from file user {user_id}: +{amount_rub}р")
-                    found = True
-                else:
-                    logging.warning(f"⚠️ Invoice {invoice_id} не найден нигде")
         
         return jsonify({'ok': True}), 200
     except Exception as e:
-        logging.error(f"❌ Webhook error: {e}")
+        logging.error(f"❌ CryptoBot Webhook error: {e}")
         return jsonify({'ok': False}), 500
 
 def save_invoice_user_map(invoice_id, user_id):
@@ -678,17 +684,18 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ *Создано!*\n\n{CATEGORIES[category]}\n📊 {quantity} {unit}\n💰 ${price} USD (≈{price_rub:.0f}р)", reply_markup=get_main_menu(), parse_mode="Markdown")
     return ConversationHandler.END
 
-def run_flask():
-    port = int(os.environ.get('PORT', 8080))
-    flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+async def setup_webhook():
+    """Один раз установить webhook для Telegram"""
+    try:
+        webhook_url = "https://oxideescort-3.onrender.com/webhook/telegram"
+        await bot.set_webhook(url=webhook_url)
+        logging.info(f"✅ Telegram webhook set: {webhook_url}")
+    except Exception as e:
+        logging.error(f"Error setting webhook: {e}")
 
 def main():
-    global invoices_map
+    global invoices_map, app
     invoices_map = load_invoices()
-    
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    print(f"🌐 Flask запущен!")
     
     app = Application.builder().token(config.TELEGRAM_TOKEN).build()
     
@@ -724,14 +731,13 @@ def main():
     app.add_handler(CallbackQueryHandler(check_payment, pattern="check_"))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    print("🚀 БОТ ЗАПУЩЕН!")
-    app.run_polling()
+    # Установить webhook один раз
+    asyncio.run(setup_webhook())
+    
+    port = int(os.environ.get('PORT', 8080))
+    print(f"🚀 Flask запущен на порту {port}")
+    print("✅ Webhook mode (NO POLLING)")
+    flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 if __name__ == '__main__':
-    import asyncio
-    try:
-        asyncio.run(main())
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(main())
+    main()
