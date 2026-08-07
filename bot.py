@@ -741,8 +741,47 @@ async def init_app():
     await setup_webhook()
 
 def main():
-    asyncio.run(init_app())
+    global invoices_map, app
+    invoices_map = load_invoices()
     
+    app = Application.builder().token(config.TELEGRAM_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    
+    deposit_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(button_handler, pattern="deposit")],
+        states={DEPOSIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_deposit_amount)]},
+        fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
+    )
+    
+    withdraw_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(button_handler, pattern="withdraw")],
+        states={
+            WITHDRAW_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_withdraw_amount)],
+            WITHDRAW_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_withdraw_address)],
+        },
+        fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
+    )
+    
+    quantity_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(button_handler, pattern="create_")],
+        states={
+            AD_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_quantity)],
+            AD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_price)],
+        },
+        fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
+    )
+    
+    app.add_handler(deposit_conv)
+    app.add_handler(withdraw_conv)
+    app.add_handler(quantity_conv)
+    app.add_handler(CallbackQueryHandler(check_payment, pattern="check_"))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    
+    # Установить webhook
+    asyncio.run(setup_webhook())
+    
+    # Запустить Flask
     port = int(os.environ.get('PORT', 8080))
     print(f"🚀 Flask WEBHOOK MODE запущен на порту {port}")
     print("✅ Telegram: /webhook/telegram")
