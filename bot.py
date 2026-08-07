@@ -15,6 +15,36 @@ logging.basicConfig(level=logging.INFO)
 flask_app = Flask(__name__)
 bot = Bot(token=config.TELEGRAM_TOKEN)
 
+# Глобальные переменные
+app = None
+invoices_map = {}
+offers_storage = {}
+offer_counter = 1
+user_wallet = {}
+user_ratings = {}
+user_history = {}
+
+AD_QUANTITY, AD_PRICE = range(2)
+DEPOSIT_AMOUNT = 2
+WITHDRAW_AMOUNT, WITHDRAW_ADDRESS = range(3, 5)
+
+CATEGORIES = {
+    "farm_sulfur": "⚒️ Фарм серы",
+    "farm_metal": "🔩 Фарм металла",
+    "farm_wood": "🪵 Фарм дерева",
+    "build_base": "🏗️ Постройка базы",
+    "farm_fuel": "⛽ Фарм топливо",
+    "raid_help": "🛡️ Помощь в рейдах",
+    "farm_scrap": "🔧 Фарм металалома",
+    "install_turrets": "🔫 Установка турелей",
+    "hide_cabinet": "🚪 Скидка шкафа",
+}
+
+CRYPTOBOT_API = "https://pay.crypt.bot/api"
+CRYPTOBOT_TOKEN = config.CRYPTO_BOT_TOKEN
+INVOICE_TIMEOUT = 300
+MIN_WITHDRAW = 1
+
 @flask_app.route('/')
 def hello():
     return 'OxideEscort Bot is running!', 200
@@ -92,34 +122,6 @@ def load_invoice_user(invoice_id):
     except:
         pass
     return None
-
-AD_QUANTITY, AD_PRICE = range(2)
-DEPOSIT_AMOUNT = 2
-WITHDRAW_AMOUNT, WITHDRAW_ADDRESS = range(3, 5)
-
-CATEGORIES = {
-    "farm_sulfur": "⚒️ Фарм серы",
-    "farm_metal": "🔩 Фарм металла",
-    "farm_wood": "🪵 Фарм дерева",
-    "build_base": "🏗️ Постройка базы",
-    "farm_fuel": "⛽ Фарм топливо",
-    "raid_help": "🛡️ Помощь в рейдах",
-    "farm_scrap": "🔧 Фарм металалома",
-    "install_turrets": "🔫 Установка турелей",
-    "hide_cabinet": "🚪 Скидка шкафа",
-}
-
-offers_storage = {}
-offer_counter = 1
-user_wallet = {}
-user_ratings = {}
-user_history = {}
-invoices_map = {}
-
-CRYPTOBOT_API = "https://pay.crypt.bot/api"
-CRYPTOBOT_TOKEN = config.CRYPTO_BOT_TOKEN
-INVOICE_TIMEOUT = 300
-MIN_WITHDRAW = 1
 
 def save_invoices():
     try:
@@ -684,21 +686,8 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ *Создано!*\n\n{CATEGORIES[category]}\n📊 {quantity} {unit}\n💰 ${price} USD (≈{price_rub:.0f}р)", reply_markup=get_main_menu(), parse_mode="Markdown")
     return ConversationHandler.END
 
-async def setup_webhook():
-    try:
-        await bot.delete_webhook()
-        logging.info("✅ Old webhook deleted")
-        
-        webhook_url = f"https://oxideescort-3.onrender.com/webhook/telegram"
-        await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
-        logging.info(f"✅ Telegram webhook set: {webhook_url}")
-    except Exception as e:
-        logging.error(f"Error setting webhook: {e}")
-
-async def init_app():
-    global invoices_map, app
-    invoices_map = load_invoices()
-    
+def setup_application():
+    global app
     app = Application.builder().token(config.TELEGRAM_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
@@ -706,7 +695,8 @@ async def init_app():
     deposit_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="deposit")],
         states={DEPOSIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_deposit_amount)]},
-        fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
+        fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)],
+        per_message=True
     )
     
     withdraw_conv = ConversationHandler(
@@ -715,7 +705,8 @@ async def init_app():
             WITHDRAW_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_withdraw_amount)],
             WITHDRAW_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_withdraw_address)],
         },
-        fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
+        fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)],
+        per_message=True
     )
     
     quantity_conv = ConversationHandler(
@@ -724,7 +715,8 @@ async def init_app():
             AD_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_quantity)],
             AD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_price)],
         },
-        fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
+        fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)],
+        per_message=True
     )
     
     app.add_handler(deposit_conv)
@@ -732,11 +724,24 @@ async def init_app():
     app.add_handler(quantity_conv)
     app.add_handler(CallbackQueryHandler(check_payment, pattern="check_"))
     app.add_handler(CallbackQueryHandler(button_handler))
-    
-    await setup_webhook()
+
+async def setup_webhook():
+    try:
+        await bot.delete_webhook()
+        logging.info("✅ Old webhook deleted")
+        
+        webhook_url = "https://oxideescort-3.onrender.com/webhook/telegram"
+        await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+        logging.info(f"✅ Telegram webhook set: {webhook_url}")
+    except Exception as e:
+        logging.error(f"Error setting webhook: {e}")
 
 def main():
-    asyncio.run(init_app())
+    global invoices_map
+    invoices_map = load_invoices()
+    
+    setup_application()
+    asyncio.run(setup_webhook())
     
     port = int(os.environ.get('PORT', 8080))
     print(f"🚀 Flask WEBHOOK MODE запущен на порту {port}")
