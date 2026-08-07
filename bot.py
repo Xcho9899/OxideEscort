@@ -738,14 +738,21 @@ def main():
     app.add_handler(CallbackQueryHandler(check_payment, pattern="check_"))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    asyncio.run(app.initialize())
-    asyncio.run(setup_webhook())
+    # КЛЮЧ: Один loop для всего!
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # Инициализировать в этом loop (NOT закрывает loop!)
+    loop.run_until_complete(app.initialize())
+    loop.run_until_complete(setup_webhook())
     
     port = int(os.environ.get('PORT', 8080))
     print(f"🚀 Flask WEBHOOK MODE запущен на порту {port}")
     print("✅ Telegram: /webhook/telegram")
     print("✅ CryptoBot: /webhook/cryptobot")
     print("❌ БЕЗ POLLING - конфликтов НЕ БУДЕТ!")
+    
+    # Flask использует СУЩЕСТВУЮЩИЙ loop для asyncio.run()
     flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 if __name__ == '__main__':
