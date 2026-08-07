@@ -106,7 +106,7 @@ def get_invoice(invoice_id):
         return None
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT user_id, amount_usd, status FROM invoices WHERE invoice_id = %s", (invoice_id,))
+        cursor.execute("SELECT user_id, amount_usd::double precision, status FROM invoices WHERE invoice_id = %s", (invoice_id,))
         return cursor.fetchone()
     except Exception as e:
         logger.error(f"❌ Get invoice error: {e}")
@@ -161,7 +161,7 @@ def get_wallet(user_id):
         return 0
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT balance FROM user_wallet WHERE user_id = %s", (user_id,))
+        cursor.execute("SELECT balance::double precision FROM user_wallet WHERE user_id = %s", (user_id,))
         result = cursor.fetchone()
         return float(result[0]) if result else 0
     except:
