@@ -12,6 +12,7 @@ from aiogram.types import Update, Message, CallbackQuery, InlineKeyboardButton, 
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.exceptions import TelegramBadRequest
 from datetime import datetime, timedelta
 import config
 
@@ -257,7 +258,11 @@ async def board_handler(query: CallbackQuery):
         count = len([o for o in offers_storage.values() if o['category'] == key])
         keyboard.append([InlineKeyboardButton(text=f"{name} ({count})", callback_data=f"cat_{key}")])
     keyboard.append([InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")])
-    await query.message.edit_text("🛍️ <b>Доска услуг</b>\n\nВыберите категорию:", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    try:
+        await query.message.edit_text("🛍️ <b>Доска услуг</b>\n\nВыберите категорию:", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise e
 
 @router.callback_query(F.data.startswith("cat_"))
 async def category_handler(query: CallbackQuery):
@@ -266,14 +271,22 @@ async def category_handler(query: CallbackQuery):
     offers = [o for o in offers_storage.values() if o['category'] == category]
     if not offers:
         keyboard = [[InlineKeyboardButton(text="⬅️ Назад", callback_data="board")]]
-        await query.message.edit_text("📭 Предложений нет", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+        try:
+            await query.message.edit_text("📭 Предложений нет", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise e
     else:
         keyboard = []
         for offer in offers:
             price_rub = convert_usd_to_rub(offer['price'])
             keyboard.append([InlineKeyboardButton(text=f"💰 {offer['quantity']} {offer['unit']} = ${offer['price']} USD (≈{price_rub:.0f}р)", callback_data=f"offer_{offer['id']}")])
         keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="board")])
-        await query.message.edit_text(f"📊 <b>{CATEGORIES[category]}</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+        try:
+            await query.message.edit_text(f"📊 <b>{CATEGORIES[category]}</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise e
 
 @router.callback_query(F.data == "wallet")
 async def wallet_handler(query: CallbackQuery):
@@ -283,14 +296,22 @@ async def wallet_handler(query: CallbackQuery):
     balance = user_wallet.get(user_id, 0)
     balance_usd = balance / rate
     keyboard = [[InlineKeyboardButton(text="💳 Пополнить", callback_data="deposit")], [InlineKeyboardButton(text="💰 Вывести", callback_data="withdraw")], [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]]
-    await query.message.edit_text(f"💳 <b>Кошелек</b>\n\n💵 Баланс: {balance:.0f}р (${balance_usd:.2f} USD)", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    try:
+        await query.message.edit_text(f"💳 <b>Кошелек</b>\n\n💵 Баланс: {balance:.0f}р (${balance_usd:.2f} USD)", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise e
 
 @router.callback_query(F.data == "deposit")
 async def deposit_start(query: CallbackQuery, state: FSMContext):
     await query.answer()
     rate = get_usdt_rub_rate()
     keyboard = [[InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]]
-    await query.message.edit_text(f"💵 <b>Введите сумму в РУБЛЯХ</b>\n\nТекущий курс: 1 USD = {rate:.2f}р", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    try:
+        await query.message.edit_text(f"💵 <b>Введите сумму в РУБЛЯХ</b>\n\nТекущий курс: 1 USD = {rate:.2f}р", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise e
     await state.set_state(DepositStates.amount)
 
 @router.message(DepositStates.amount)
@@ -321,9 +342,17 @@ async def withdraw_start(query: CallbackQuery, state: FSMContext):
     balance = user_wallet.get(user_id, 0)
     balance_usd = balance / rate
     if balance_usd < MIN_WITHDRAW:
-        await query.message.edit_text(f"❌ <b>Недостаточно средств!</b>\n\nМинимум для вывода: ${MIN_WITHDRAW} USD\nВаш баланс: ${balance_usd:.2f} USD", reply_markup=get_main_menu())
+        try:
+            await query.message.edit_text(f"❌ <b>Недостаточно средств!</b>\n\nМинимум для вывода: ${MIN_WITHDRAW} USD\nВаш баланс: ${balance_usd:.2f} USD", reply_markup=get_main_menu())
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise e
     else:
-        await query.message.edit_text(f"💰 <b>Введите сумму в USD</b>\n\nВаш баланс: ${balance_usd:.2f} USD\nМинимум: ${MIN_WITHDRAW} USD")
+        try:
+            await query.message.edit_text(f"💰 <b>Введите сумму в USD</b>\n\nВаш баланс: ${balance_usd:.2f} USD\nМинимум: ${MIN_WITHDRAW} USD")
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise e
         await state.set_state(WithdrawStates.amount)
 
 @router.message(WithdrawStates.amount)
@@ -374,11 +403,19 @@ async def check_payment(query: CallbackQuery):
     await query.answer()
     invoice_id = query.data.replace("check_", "")
     if invoice_id not in invoices_map:
-        await query.message.edit_text("❌ <b>Счет истек!</b>\n\nВремя на оплату составляет 5 минут. Создайте новый счет.", reply_markup=get_main_menu())
+        try:
+            await query.message.edit_text("❌ <b>Счет истек!</b>\n\nВремя на оплату составляет 5 минут. Создайте новый счет.", reply_markup=get_main_menu())
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise e
         return
     invoice = invoices_map[invoice_id]
     if invoice.get('status') == 'paid':
-        await query.message.edit_text(f"✅ <b>Платеж уже обработан!</b>\n\n💰 +${invoice['amount_usd']} USD\n💵 +{convert_usd_to_rub(invoice['amount_usd']):.0f}р\n\nПроверьте баланс в Кошельке!", reply_markup=get_main_menu())
+        try:
+            await query.message.edit_text(f"✅ <b>Платеж уже обработан!</b>\n\n💰 +${invoice['amount_usd']} USD\n💵 +{convert_usd_to_rub(invoice['amount_usd']):.0f}р\n\nПроверьте баланс в Кошельке!", reply_markup=get_main_menu())
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise e
         return
     is_paid = check_invoice_paid(invoice_id)
     if is_paid:
@@ -389,9 +426,17 @@ async def check_payment(query: CallbackQuery):
         user_history[user_id].append({'type': 'deposit', 'amount': amount_rub, 'description': f'Платеж ${amount_usd} USD'})
         invoices_map[invoice_id]['status'] = 'paid'
         save_invoices()
-        await query.message.edit_text(f"✅ <b>Платеж успешен!</b>\n\n💰 +${amount_usd} USD\n💵 +{amount_rub:.0f}р", reply_markup=get_main_menu())
+        try:
+            await query.message.edit_text(f"✅ <b>Платеж успешен!</b>\n\n💰 +${amount_usd} USD\n💵 +{amount_rub:.0f}р", reply_markup=get_main_menu())
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise e
     else:
-        await query.message.edit_text("⏳ <b>Платеж еще не поступил</b>\n\nПожалуйста подождите или проверьте позже.", reply_markup=get_main_menu())
+        try:
+            await query.message.edit_text("⏳ <b>Платеж еще не поступил</b>\n\nПожалуйста подождите или проверьте позже.", reply_markup=get_main_menu())
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise e
 
 @router.callback_query(F.data == "my_offers")
 async def my_offers_handler(query: CallbackQuery):
@@ -419,7 +464,11 @@ async def my_offers_handler(query: CallbackQuery):
         for key, name in CATEGORIES.items():
             keyboard.append([InlineKeyboardButton(text=f"➕ {name}", callback_data=f"create_{key}")])
         keyboard.append([InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")])
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    try:
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise e
 
 @router.callback_query(F.data.startswith("create_"))
 async def create_offer_start(query: CallbackQuery, state: FSMContext):
@@ -427,10 +476,18 @@ async def create_offer_start(query: CallbackQuery, state: FSMContext):
     category = query.data.replace("create_", "")
     user_id = query.from_user.id
     if user_has_offer_in_category(user_id, category):
-        await query.message.edit_text(f"❌ <b>У вас уже есть объявление в этой категории!</b>\n\n{CATEGORIES[category]}\n\nМаксимум 1 объявление на категорию!", reply_markup=get_main_menu())
+        try:
+            await query.message.edit_text(f"❌ <b>У вас уже есть объявление в этой категории!</b>\n\n{CATEGORIES[category]}\n\nМаксимум 1 объявление на категорию!", reply_markup=get_main_menu())
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise e
     else:
         await state.update_data(category=category)
-        await query.message.edit_text(f"📊 Введите количество для {CATEGORIES[category]}")
+        try:
+            await query.message.edit_text(f"📊 Введите количество для {CATEGORIES[category]}")
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise e
         await state.set_state(OfferStates.quantity)
 
 @router.message(OfferStates.quantity)
@@ -477,12 +534,20 @@ async def cancel_offer(query: CallbackQuery):
         offer = offers_storage[offer_id]
         if offer['author_id'] == user_id:
             del offers_storage[offer_id]
-            await query.message.edit_text(f"✅ <b>Объявление отменено!</b>\n\n{CATEGORIES[offer['category']]} удалено", reply_markup=get_main_menu())
+            try:
+                await query.message.edit_text(f"✅ <b>Объявление отменено!</b>\n\n{CATEGORIES[offer['category']]} удалено", reply_markup=get_main_menu())
+            except TelegramBadRequest as e:
+                if "message is not modified" not in str(e):
+                    raise e
 
 @router.callback_query(F.data == "my_deals")
 async def my_deals_handler(query: CallbackQuery):
     await query.answer()
-    await query.message.edit_text("📋 У вас нет сделок", reply_markup=get_main_menu())
+    try:
+        await query.message.edit_text("📋 У вас нет сделок", reply_markup=get_main_menu())
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise e
 
 @router.callback_query(F.data == "profile")
 async def profile_handler(query: CallbackQuery):
@@ -492,7 +557,11 @@ async def profile_handler(query: CallbackQuery):
     avg_rating = rating_data.get('total_rating', 0) / max(rating_data.get('count', 1), 1)
     my_offers_count = len([o for o in offers_storage.values() if o['author_id'] == user_id])
     deals_count = rating_data.get('deals', 0)
-    await query.message.edit_text(f"👤 <b>Профиль</b>\n\n⭐ Рейтинг: {avg_rating:.1f}/5\n📊 Сделок: {deals_count}\n📋 Предложений: {my_offers_count}", reply_markup=get_main_menu())
+    try:
+        await query.message.edit_text(f"👤 <b>Профиль</b>\n\n⭐ Рейтинг: {avg_rating:.1f}/5\n📊 Сделок: {deals_count}\n📋 Предложений: {my_offers_count}", reply_markup=get_main_menu())
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise e
 
 @router.callback_query(F.data == "history")
 async def history_handler(query: CallbackQuery):
@@ -500,22 +569,38 @@ async def history_handler(query: CallbackQuery):
     user_id = query.from_user.id
     transactions = user_history.get(user_id, [])
     if not transactions:
-        await query.message.edit_text("📜 История пуста", reply_markup=get_main_menu())
+        try:
+            await query.message.edit_text("📜 История пуста", reply_markup=get_main_menu())
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise e
     else:
         text = "📜 <b>История:</b>\n\n"
         for trans in transactions[-10:]:
             text += f"💰 {trans['description']}\n"
-        await query.message.edit_text(text, reply_markup=get_main_menu())
+        try:
+            await query.message.edit_text(text, reply_markup=get_main_menu())
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise e
 
 @router.callback_query(F.data == "help")
 async def help_handler(query: CallbackQuery):
     await query.answer()
-    await query.message.edit_text("❓ <b>Справка</b>\n\n1. Найди услугу\n2. Пополни баланс в рублях\n3. Создай предложение\n\n💰 Комиссия 5%\n💵 USDT USD", reply_markup=get_main_menu())
+    try:
+        await query.message.edit_text("❓ <b>Справка</b>\n\n1. Найди услугу\n2. Пополни баланс в рублях\n3. Создай предложение\n\n💰 Комиссия 5%\n💵 USDT USD", reply_markup=get_main_menu())
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise e
 
 @router.callback_query(F.data == "return_main")
 async def return_main(query: CallbackQuery):
     await query.answer()
-    await query.message.edit_text("🎯 <b>Меню</b>", reply_markup=get_main_menu())
+    try:
+        await query.message.edit_text("🎯 <b>Меню</b>", reply_markup=get_main_menu())
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise e
 
 async def on_startup(bot: Bot) -> None:
     try:
