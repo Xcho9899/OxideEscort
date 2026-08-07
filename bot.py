@@ -685,21 +685,17 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def setup_webhook():
-    """Установить webhook для Telegram один раз"""
     try:
-        # Сначала удалить старый webhook
         await bot.delete_webhook()
         logging.info("✅ Old webhook deleted")
         
-        # Затем установить новый
-        webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'oxideescort-3.onrender.com')}/webhook/telegram"
+        webhook_url = f"https://oxideescort-3.onrender.com/webhook/telegram"
         await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
         logging.info(f"✅ Telegram webhook set: {webhook_url}")
     except Exception as e:
         logging.error(f"Error setting webhook: {e}")
 
 async def init_app():
-    """Инициализировать приложение"""
     global invoices_map, app
     invoices_map = load_invoices()
     
@@ -737,51 +733,11 @@ async def init_app():
     app.add_handler(CallbackQueryHandler(check_payment, pattern="check_"))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    # Установить webhook
     await setup_webhook()
 
 def main():
-    global invoices_map, app
-    invoices_map = load_invoices()
+    asyncio.run(init_app())
     
-    app = Application.builder().token(config.TELEGRAM_TOKEN).build()
-    
-    app.add_handler(CommandHandler("start", start))
-    
-    deposit_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern="deposit")],
-        states={DEPOSIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_deposit_amount)]},
-        fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
-    )
-    
-    withdraw_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern="withdraw")],
-        states={
-            WITHDRAW_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_withdraw_amount)],
-            WITHDRAW_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_withdraw_address)],
-        },
-        fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
-    )
-    
-    quantity_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern="create_")],
-        states={
-            AD_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_quantity)],
-            AD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_price)],
-        },
-        fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
-    )
-    
-    app.add_handler(deposit_conv)
-    app.add_handler(withdraw_conv)
-    app.add_handler(quantity_conv)
-    app.add_handler(CallbackQueryHandler(check_payment, pattern="check_"))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    
-    # Установить webhook
-    asyncio.run(setup_webhook())
-    
-    # Запустить Flask
     port = int(os.environ.get('PORT', 8080))
     print(f"🚀 Flask WEBHOOK MODE запущен на порту {port}")
     print("✅ Telegram: /webhook/telegram")
