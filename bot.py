@@ -657,7 +657,7 @@ async def profile_handler(query: CallbackQuery):
     my_offers_count = len([o for o in offers_storage.values() if o['author_id'] == user_id])
     deals_count = rating_data.get('deals', 0)
     
-    await query.message.edit_text(
+    await query.edit_message_text()
         f"👤 <b>Профиль</b>\n\n"
         f"⭐ Рейтинг: {avg_rating:.1f}/5\n"
         f"📊 Сделок: {deals_count}\n"
