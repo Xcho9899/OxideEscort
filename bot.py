@@ -23,7 +23,7 @@ def hello():
 def webhook_cryptobot():
     try:
         data = request.get_json()
-        logging.info(f"✅ Webhook received: invoice_id={data.get('payload', {}).get('invoice_id')}")
+        logging.info(f"✅ Webhook received")
         
         payload = data.get('payload', {})
         
@@ -33,50 +33,59 @@ def webhook_cryptobot():
             
             logging.info(f"💰 Invoice {invoice_id} PAID! Amount: ${amount_usd}")
             
+            # Ищем в памяти
             found = False
             for inv_id, inv_data in list(invoices_map.items()):
                 if str(inv_id) == str(invoice_id):
                     user_id = inv_data['user_id']
                     amount_rub = convert_usd_to_rub(amount_usd)
-                    
                     user_wallet[user_id] = user_wallet.get(user_id, 0) + amount_rub
-                    user_history[user_id].append({
-                        'type': 'deposit',
-                        'amount': amount_rub,
-                        'description': f'Платеж ${amount_usd} USD'
-                    })
-                    
+                    user_history[user_id].append({'type': 'deposit', 'amount': amount_rub, 'description': f'Платеж ${amount_usd} USD'})
                     invoices_map[inv_id]['status'] = 'paid'
                     save_invoices()
-                    logging.info(f"✅✅ Payment CONFIRMED for user {user_id}: +{amount_rub}р")
+                    logging.info(f"✅✅ CONFIRMED user {user_id}: +{amount_rub}р")
+                    save_invoice_user_map(invoice_id, user_id)
                     found = True
                     break
             
+            # Если не нашли в памяти - ищем в файле
             if not found:
-                logging.warning(f"⚠️ Invoice {invoice_id} not in memory - looking in file...")
-                loaded = load_invoices()
-                for inv_id, inv_data in loaded.items():
-                    if str(inv_id) == str(invoice_id):
-                        user_id = inv_data.get('user_id', 0)
-                        if user_id and user_id > 0:
-                            amount_rub = convert_usd_to_rub(amount_usd)
-                            user_wallet[user_id] = user_wallet.get(user_id, 0) + amount_rub
-                            user_history[user_id].append({
-                                'type': 'deposit',
-                                'amount': amount_rub,
-                                'description': f'Платеж ${amount_usd} USD'
-                            })
-                            logging.info(f"✅ Payment from file CONFIRMED for user {user_id}: +{amount_rub}р")
-                            found = True
-                            break
-            
-            if not found:
-                logging.warning(f"⚠️ Invoice {invoice_id} not found anywhere but webhook received - saving anyway")
+                user_id = load_invoice_user(invoice_id)
+                if user_id:
+                    amount_rub = convert_usd_to_rub(amount_usd)
+                    user_wallet[user_id] = user_wallet.get(user_id, 0) + amount_rub
+                    user_history[user_id].append({'type': 'deposit', 'amount': amount_rub, 'description': f'Платеж ${amount_usd} USD'})
+                    logging.info(f"✅ CONFIRMED from file user {user_id}: +{amount_rub}р")
+                    found = True
+                else:
+                    logging.warning(f"⚠️ Invoice {invoice_id} не найден нигде")
         
         return jsonify({'ok': True}), 200
     except Exception as e:
         logging.error(f"❌ Webhook error: {e}")
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        return jsonify({'ok': False}), 500
+
+def save_invoice_user_map(invoice_id, user_id):
+    try:
+        data = {}
+        if os.path.exists('invoice_users.json'):
+            with open('invoice_users.json', 'r') as f:
+                data = json.load(f)
+        data[str(invoice_id)] = user_id
+        with open('invoice_users.json', 'w') as f:
+            json.dump(data, f)
+    except:
+        pass
+
+def load_invoice_user(invoice_id):
+    try:
+        if os.path.exists('invoice_users.json'):
+            with open('invoice_users.json', 'r') as f:
+                data = json.load(f)
+                return data.get(str(invoice_id))
+    except:
+        pass
+    return None
 
 AD_QUANTITY, AD_PRICE = range(2)
 DEPOSIT_AMOUNT = 2
@@ -118,7 +127,6 @@ def save_invoices():
             }
         with open('invoices.json', 'w') as f:
             json.dump(data, f)
-        logging.info("💾 Invoices saved")
     except Exception as e:
         logging.error(f"Error saving invoices: {e}")
 
@@ -138,10 +146,9 @@ def load_invoices():
                         }
                     except:
                         pass
-                logging.info(f"📂 Loaded {len(loaded)} invoices from file")
                 return loaded
-    except Exception as e:
-        logging.error(f"Error loading invoices: {e}")
+    except:
+        pass
     return {}
 
 def cleanup_memory():
@@ -160,7 +167,6 @@ def cleanup_memory():
         if created_at and (now - created_at).total_seconds() > INVOICE_TIMEOUT:
             if invoice.get('status') != 'paid':
                 expired_invoices.append(invoice_id)
-                logging.info(f"Invoice {invoice_id} expired")
     
     for invoice_id in expired_invoices:
         del invoices_map[invoice_id]
@@ -191,26 +197,10 @@ def user_has_offer_in_category(user_id, category):
 
 def create_cryptobot_invoice(amount_usd: float, description: str, user_id: int):
     try:
-        headers = {
-            "Crypto-Pay-API-Token": CRYPTOBOT_TOKEN,
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "amount": str(amount_usd),
-            "fiat_currency": "USD",
-            "asset": "USDT",
-            "description": description,
-            "expires_in": 3600
-        }
+        headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN, "Content-Type": "application/json"}
+        payload = {"amount": str(amount_usd), "fiat_currency": "USD", "asset": "USDT", "description": description, "expires_in": 3600}
         
-        logging.info(f"Creating invoice: ${amount_usd}")
-        
-        response = requests.post(
-            f"{CRYPTOBOT_API}/createInvoice",
-            headers=headers,
-            json=payload,
-            timeout=10
-        )
+        response = requests.post(f"{CRYPTOBOT_API}/createInvoice", headers=headers, json=payload, timeout=10)
         
         if response.status_code == 200:
             data = response.json()
@@ -227,6 +217,7 @@ def create_cryptobot_invoice(amount_usd: float, description: str, user_id: int):
                 }
                 
                 save_invoices()
+                save_invoice_user_map(invoice_id, user_id)
                 logging.info(f"Invoice created: {invoice_id}")
                 return pay_url, invoice_id
         return None, None
@@ -236,24 +227,15 @@ def create_cryptobot_invoice(amount_usd: float, description: str, user_id: int):
 
 def check_invoice_paid(invoice_id: str):
     try:
-        headers = {
-            "Crypto-Pay-API-Token": CRYPTOBOT_TOKEN,
-            "Content-Type": "application/json"
-        }
-        
-        response = requests.get(
-            f"{CRYPTOBOT_API}/getInvoices?invoice_ids={invoice_id}",
-            headers=headers,
-            timeout=10
-        )
+        headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN, "Content-Type": "application/json"}
+        response = requests.get(f"{CRYPTOBOT_API}/getInvoices?invoice_ids={invoice_id}", headers=headers, timeout=10)
         
         if response.status_code == 200:
             data = response.json()
             if data.get('ok'):
                 invoices = data.get('result', {}).get('items', [])
                 if invoices:
-                    invoice = invoices[0]
-                    return invoice.get('status') == 'paid'
+                    return invoices[0].get('status') == 'paid'
         return False
     except Exception as e:
         logging.error(f"Error checking invoice: {e}")
@@ -261,25 +243,10 @@ def check_invoice_paid(invoice_id: str):
 
 def transfer_usdt(amount_usd: float, address: str):
     try:
-        headers = {
-            "Crypto-Pay-API-Token": CRYPTOBOT_TOKEN,
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "asset": "USDT",
-            "amount": str(amount_usd),
-            "address": address,
-            "network": "tron"
-        }
+        headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN, "Content-Type": "application/json"}
+        payload = {"asset": "USDT", "amount": str(amount_usd), "address": address, "network": "tron"}
         
-        logging.info(f"Transferring {amount_usd} USDT to {address}")
-        
-        response = requests.post(
-            f"{CRYPTOBOT_API}/transfer",
-            headers=headers,
-            json=payload,
-            timeout=10
-        )
+        response = requests.post(f"{CRYPTOBOT_API}/transfer", headers=headers, json=payload, timeout=10)
         
         if response.status_code == 200:
             data = response.json()
@@ -344,11 +311,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("🏠 Меню", callback_data="return_main")])
         
         try:
-            await query.edit_message_text(
-                "🛍️ *Доска услуг*\n\nВыберите категорию:",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
-            )
+            await query.edit_message_text("🛍️ *Доска услуг*\n\nВыберите категорию:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         except BadRequest as e:
             if "Message is not modified" not in str(e):
                 raise e
@@ -368,18 +331,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = []
             for offer in offers:
                 price_rub = convert_usd_to_rub(offer['price'])
-                keyboard.append([InlineKeyboardButton(
-                    f"💰 {offer['quantity']} {offer['unit']} = ${offer['price']} USD (≈{price_rub:.0f}р)",
-                    callback_data=f"offer_{offer['id']}"
-                )])
+                keyboard.append([InlineKeyboardButton(f"💰 {offer['quantity']} {offer['unit']} = ${offer['price']} USD (≈{price_rub:.0f}р)", callback_data=f"offer_{offer['id']}")])
             keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="board")])
             
             try:
-                await query.edit_message_text(
-                    f"📊 *{CATEGORIES[category]}*",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode="Markdown"
-                )
+                await query.edit_message_text(f"📊 *{CATEGORIES[category]}*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
             except BadRequest as e:
                 if "Message is not modified" not in str(e):
                     raise e
@@ -389,10 +345,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if user_has_offer_in_category(user_id, category):
             try:
-                await query.edit_message_text(
-                    f"❌ *У вас уже есть объявление в этой категории!*\n\n{CATEGORIES[category]}\n\nМаксимум 1 объявление на категорию!",
-                    reply_markup=get_main_menu()
-                )
+                await query.edit_message_text(f"❌ *У вас уже есть объявление в этой категории!*\n\n{CATEGORIES[category]}\n\nМаксимум 1 объявление на категорию!", reply_markup=get_main_menu())
             except BadRequest as e:
                 if "Message is not modified" not in str(e):
                     raise e
@@ -415,26 +368,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         
         try:
-            await query.edit_message_text(
-                f"💳 *Кошелек*\n\n💵 Баланс: {balance:.0f}р (${balance_usd:.2f} USD)",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
-            )
+            await query.edit_message_text(f"💳 *Кошелек*\n\n💵 Баланс: {balance:.0f}р (${balance_usd:.2f} USD)", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         except BadRequest as e:
             if "Message is not modified" not in str(e):
                 raise e
     
     elif data == "deposit":
         rate = get_usdt_rub_rate()
-        keyboard = [
-            [InlineKeyboardButton("🏠 Меню", callback_data="return_main")]
-        ]
+        keyboard = [[InlineKeyboardButton("🏠 Меню", callback_data="return_main")]]
         try:
-            await query.edit_message_text(
-                f"💵 *Введите сумму в РУБЛЯХ*\n\nТекущий курс: 1 USD = {rate:.2f}р",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
-            )
+            await query.edit_message_text(f"💵 *Введите сумму в РУБЛЯХ*\n\nТекущий курс: 1 USD = {rate:.2f}р", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         except BadRequest as e:
             if "Message is not modified" not in str(e):
                 raise e
@@ -446,18 +389,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if balance_usd < MIN_WITHDRAW:
             try:
-                await query.edit_message_text(
-                    f"❌ *Недостаточно средств!*\n\nМинимум для вывода: ${MIN_WITHDRAW} USD\nВаш баланс: ${balance_usd:.2f} USD",
-                    reply_markup=get_main_menu()
-                )
+                await query.edit_message_text(f"❌ *Недостаточно средств!*\n\nМинимум для вывода: ${MIN_WITHDRAW} USD\nВаш баланс: ${balance_usd:.2f} USD", reply_markup=get_main_menu())
             except BadRequest as e:
                 if "Message is not modified" not in str(e):
                     raise e
         else:
             try:
-                await query.edit_message_text(
-                    f"💰 *Введите сумму в USD*\n\nВаш баланс: ${balance_usd:.2f} USD\nМинимум: ${MIN_WITHDRAW} USD"
-                )
+                await query.edit_message_text(f"💰 *Введите сумму в USD*\n\nВаш баланс: ${balance_usd:.2f} USD\nМинимум: ${MIN_WITHDRAW} USD")
             except BadRequest as e:
                 if "Message is not modified" not in str(e):
                     raise e
@@ -473,7 +411,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text += f"💰 {offer['quantity']} {offer['unit']} = ${offer['price']} USD (≈{price_rub:.0f}р)\n"
             
             keyboard = []
-            
             for offer in my_offers:
                 keyboard.append([InlineKeyboardButton(f"❌ Отменить #{offer['id']}", callback_data=f"cancel_{offer['id']}")])
             
@@ -507,10 +444,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if offer['author_id'] == user_id:
                 del offers_storage[offer_id]
                 try:
-                    await query.edit_message_text(
-                        f"✅ *Объявление отменено!*\n\n{CATEGORIES[offer['category']]} удалено",
-                        reply_markup=get_main_menu()
-                    )
+                    await query.edit_message_text(f"✅ *Объявление отменено!*\n\n{CATEGORIES[offer['category']]} удалено", reply_markup=get_main_menu())
                 except BadRequest as e:
                     if "Message is not modified" not in str(e):
                         raise e
@@ -529,11 +463,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         deals_count = rating_data.get('deals', 0)
         
         try:
-            await query.edit_message_text(
-                f"👤 *Профиль*\n\n⭐ Рейтинг: {avg_rating:.1f}/5\n📊 Сделок: {deals_count}\n📋 Предложений: {my_offers_count}",
-                reply_markup=get_main_menu(),
-                parse_mode="Markdown"
-            )
+            await query.edit_message_text(f"👤 *Профиль*\n\n⭐ Рейтинг: {avg_rating:.1f}/5\n📊 Сделок: {deals_count}\n📋 Предложений: {my_offers_count}", reply_markup=get_main_menu(), parse_mode="Markdown")
         except BadRequest as e:
             if "Message is not modified" not in str(e):
                 raise e
@@ -560,11 +490,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == "help":
         try:
-            await query.edit_message_text(
-                "❓ *Справка*\n\n1. Найди услугу\n2. Пополни баланс в рублях\n3. Создай предложение\n\n💰 Комиссия 5%\n💵 USDT USD",
-                reply_markup=get_main_menu(),
-                parse_mode="Markdown"
-            )
+            await query.edit_message_text("❓ *Справка*\n\n1. Найди услугу\n2. Пополни баланс в рублях\n3. Создай предложение\n\n💰 Комиссия 5%\n💵 USDT USD", reply_markup=get_main_menu(), parse_mode="Markdown")
         except BadRequest as e:
             if "Message is not modified" not in str(e):
                 raise e
@@ -587,7 +513,6 @@ async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return DEPOSIT_AMOUNT
         
         amount_usd = convert_rub_to_usd(amount_rub)
-        
         pay_url, invoice_id = create_cryptobot_invoice(amount_usd, f"Пополнение OxideEscort", user_id)
         
         if pay_url:
@@ -597,11 +522,7 @@ async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 [InlineKeyboardButton("🏠 Меню", callback_data="return_main")]
             ]
             
-            await update.message.reply_text(
-                f"💵 *Счет создан!*\n\n📥 Вы ввели: {amount_rub:.0f}р\n📤 К оплате: ${amount_usd} USD\n📊 Курс: 1 USD = {rate:.2f}р\n⏱️ Счет действителен 5 минут\n\nНажми 'Оплатить' для перевода через CryptoBot",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
-            )
+            await update.message.reply_text(f"💵 *Счет создан!*\n\n📥 Вы ввели: {amount_rub:.0f}р\n📤 К оплате: ${amount_usd} USD\n📊 Курс: 1 USD = {rate:.2f}р\n⏱️ Счет действителен 5 минут\n\nНажми 'Оплатить' для перевода через CryptoBot", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
             return ConversationHandler.END
         else:
             await update.message.reply_text("❌ Ошибка создания счета!", reply_markup=get_main_menu())
@@ -650,23 +571,11 @@ async def get_withdraw_address(update: Update, context: ContextTypes.DEFAULT_TYP
             amount_rub = convert_usd_to_rub(amount_usd)
             user_wallet[user_id] = user_wallet.get(user_id, 0) - amount_rub
             
-            user_history[user_id].append({
-                'type': 'withdraw',
-                'amount': amount_rub,
-                'description': f'Вывод ${amount_usd} USD на {address[:10]}...'
-            })
+            user_history[user_id].append({'type': 'withdraw', 'amount': amount_rub, 'description': f'Вывод ${amount_usd} USD на {address[:10]}...'})
             
-            await update.message.reply_text(
-                f"✅ *Транзакция прошла успешно!*\n\n💰 Отправлено: ${amount_usd} USD\n📍 На адрес: {address}\n\nБаланс обновлен!",
-                reply_markup=get_main_menu(),
-                parse_mode="Markdown"
-            )
+            await update.message.reply_text(f"✅ *Транзакция прошла успешно!*\n\n💰 Отправлено: ${amount_usd} USD\n📍 На адрес: {address}\n\nБаланс обновлен!", reply_markup=get_main_menu(), parse_mode="Markdown")
         else:
-            await update.message.reply_text(
-                f"❌ *Ошибка при отправке!*\n\n{result}\n\nПопробуйте позже.",
-                reply_markup=get_main_menu(),
-                parse_mode="Markdown"
-            )
+            await update.message.reply_text(f"❌ *Ошибка при отправке!*\n\n{result}\n\nПопробуйте позже.", reply_markup=get_main_menu(), parse_mode="Markdown")
         
         return ConversationHandler.END
     except Exception as e:
@@ -683,10 +592,7 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if invoice_id not in invoices_map:
         try:
-            await query.edit_message_text(
-                "❌ *Счет истек!*\n\nВремя на оплату составляет 5 минут. Создайте новый счет.",
-                reply_markup=get_main_menu()
-            )
+            await query.edit_message_text("❌ *Счет истек!*\n\nВремя на оплату составляет 5 минут. Создайте новый счет.", reply_markup=get_main_menu())
         except BadRequest as e:
             if "Message is not modified" not in str(e):
                 raise e
@@ -696,10 +602,7 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if invoice.get('status') == 'paid':
         try:
-            await query.edit_message_text(
-                f"✅ *Платеж уже обработан!*\n\n💰 +${invoice['amount_usd']} USD\n💵 +{convert_usd_to_rub(invoice['amount_usd']):.0f}р\n\nПроверьте баланс в Кошельке!",
-                reply_markup=get_main_menu()
-            )
+            await query.edit_message_text(f"✅ *Платеж уже обработан!*\n\n💰 +${invoice['amount_usd']} USD\n💵 +{convert_usd_to_rub(invoice['amount_usd']):.0f}р\n\nПроверьте баланс в Кошельке!", reply_markup=get_main_menu())
         except BadRequest as e:
             if "Message is not modified" not in str(e):
                 raise e
@@ -713,29 +616,19 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount_rub = convert_usd_to_rub(amount_usd)
         
         user_wallet[user_id] = user_wallet.get(user_id, 0) + amount_rub
-        user_history[user_id].append({
-            'type': 'deposit',
-            'amount': amount_rub,
-            'description': f'Платеж ${amount_usd} USD'
-        })
+        user_history[user_id].append({'type': 'deposit', 'amount': amount_rub, 'description': f'Платеж ${amount_usd} USD'})
         
         invoices_map[invoice_id]['status'] = 'paid'
         save_invoices()
         
         try:
-            await query.edit_message_text(
-                f"✅ *Платеж успешен!*\n\n💰 +${amount_usd} USD\n💵 +{amount_rub:.0f}р",
-                reply_markup=get_main_menu()
-            )
+            await query.edit_message_text(f"✅ *Платеж успешен!*\n\n💰 +${amount_usd} USD\n💵 +{amount_rub:.0f}р", reply_markup=get_main_menu())
         except BadRequest as e:
             if "Message is not modified" not in str(e):
                 raise e
     else:
         try:
-            await query.edit_message_text(
-                "⏳ *Платеж еще не поступил*\n\nПожалуйста подождите или проверьте позже.",
-                reply_markup=get_main_menu()
-            )
+            await query.edit_message_text("⏳ *Платеж еще не поступил*\n\nПожалуйста подождите или проверьте позже.", reply_markup=get_main_menu())
         except BadRequest as e:
             if "Message is not modified" not in str(e):
                 raise e
@@ -766,27 +659,14 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     quantity = context.user_data.get('quantity')
     
     units = {
-        "farm_sulfur": "серы",
-        "farm_metal": "металла",
-        "farm_wood": "дерева",
-        "build_base": "базы",
-        "farm_fuel": "топлива",
-        "raid_help": "рейдов",
-        "farm_scrap": "металалома",
-        "install_turrets": "турелей",
-        "hide_cabinet": "шкафов",
+        "farm_sulfur": "серы", "farm_metal": "металла", "farm_wood": "дерева", "build_base": "базы", "farm_fuel": "топлива",
+        "raid_help": "рейдов", "farm_scrap": "металалома", "install_turrets": "турелей", "hide_cabinet": "шкафов",
     }
     unit = units.get(category, "ед")
     
     offer_id = offer_counter
     offers_storage[offer_id] = {
-        'id': offer_id,
-        'category': category,
-        'quantity': quantity,
-        'unit': unit,
-        'price': price,
-        'author_id': user_id,
-        'author': username
+        'id': offer_id, 'category': category, 'quantity': quantity, 'unit': unit, 'price': price, 'author_id': user_id, 'author': username
     }
     offer_counter += 1
     
@@ -795,11 +675,7 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     price_rub = convert_usd_to_rub(price)
     
-    await update.message.reply_text(
-        f"✅ *Создано!*\n\n{CATEGORIES[category]}\n📊 {quantity} {unit}\n💰 ${price} USD (≈{price_rub:.0f}р)",
-        reply_markup=get_main_menu(),
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(f"✅ *Создано!*\n\n{CATEGORIES[category]}\n📊 {quantity} {unit}\n💰 ${price} USD (≈{price_rub:.0f}р)", reply_markup=get_main_menu(), parse_mode="Markdown")
     return ConversationHandler.END
 
 def run_flask():
@@ -812,7 +688,7 @@ def main():
     
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    print(f"🌐 Flask запущен на порту {os.environ.get('PORT', 8080)}")
+    print(f"🌐 Flask запущен!")
     
     app = Application.builder().token(config.TELEGRAM_TOKEN).build()
     
@@ -820,9 +696,7 @@ def main():
     
     deposit_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="deposit")],
-        states={
-            DEPOSIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_deposit_amount)],
-        },
+        states={DEPOSIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_deposit_amount)]},
         fallbacks=[CommandHandler("start", start), CallbackQueryHandler(button_handler)]
     )
     
@@ -850,7 +724,7 @@ def main():
     app.add_handler(CallbackQueryHandler(check_payment, pattern="check_"))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    print("🚀 OxideEscort БОТ ЗАПУЩЕН!")
+    print("🚀 БОТ ЗАПУЩЕН!")
     app.run_polling()
 
 if __name__ == '__main__':
