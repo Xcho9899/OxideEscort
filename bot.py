@@ -5,6 +5,7 @@ import asyncio
 import psycopg2
 from psycopg2 import pool
 from datetime import datetime
+from uuid import uuid4
 from aiohttp import web
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
@@ -298,9 +299,16 @@ def check_invoice_paid(invoice_id: str):
 
 def transfer_usdt(amount_usd: float, address: str):
     try:
-        logger.info(f"Transfer: ${amount_usd} to {address}")
+        spend_id = str(uuid4())
+        logger.info(f"Transfer: ${amount_usd} to {address}, spendId={spend_id}")
         headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN, "Content-Type": "application/json"}
-        payload = {"asset": "USDT", "amount": str(amount_usd), "address": address, "network": "tron"}
+        payload = {
+            "asset": "USDT",
+            "amount": str(amount_usd),
+            "address": address,
+            "network": "tron",
+            "spendId": spend_id
+        }
         logger.info(f"Transfer payload: {payload}")
         response = requests.post(f"{CRYPTOBOT_API}/transfer", headers=headers, json=payload, timeout=10)
         logger.info(f"Transfer status: {response.status_code}")
