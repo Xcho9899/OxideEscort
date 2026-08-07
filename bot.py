@@ -15,7 +15,6 @@ logging.basicConfig(level=logging.INFO)
 flask_app = Flask(__name__)
 bot = Bot(token=config.TELEGRAM_TOKEN)
 
-# Глобальные переменные
 app = None
 invoices_map = {}
 offers_storage = {}
@@ -686,8 +685,21 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ *Создано!*\n\n{CATEGORIES[category]}\n📊 {quantity} {unit}\n💰 ${price} USD (≈{price_rub:.0f}р)", reply_markup=get_main_menu(), parse_mode="Markdown")
     return ConversationHandler.END
 
-def setup_application():
-    global app
+async def setup_webhook():
+    try:
+        await bot.delete_webhook()
+        logging.info("✅ Old webhook deleted")
+        
+        webhook_url = "https://oxideescort-3.onrender.com/webhook/telegram"
+        await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+        logging.info(f"✅ Telegram webhook set: {webhook_url}")
+    except Exception as e:
+        logging.error(f"Error setting webhook: {e}")
+
+async def init_and_start():
+    global app, invoices_map
+    invoices_map = load_invoices()
+    
     app = Application.builder().token(config.TELEGRAM_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
@@ -724,24 +736,12 @@ def setup_application():
     app.add_handler(quantity_conv)
     app.add_handler(CallbackQueryHandler(check_payment, pattern="check_"))
     app.add_handler(CallbackQueryHandler(button_handler))
-
-async def setup_webhook():
-    try:
-        await bot.delete_webhook()
-        logging.info("✅ Old webhook deleted")
-        
-        webhook_url = "https://oxideescort-3.onrender.com/webhook/telegram"
-        await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
-        logging.info(f"✅ Telegram webhook set: {webhook_url}")
-    except Exception as e:
-        logging.error(f"Error setting webhook: {e}")
+    
+    await app.initialize()
+    await setup_webhook()
 
 def main():
-    global invoices_map
-    invoices_map = load_invoices()
-    
-    setup_application()
-    asyncio.run(setup_webhook())
+    asyncio.run(init_and_start())
     
     port = int(os.environ.get('PORT', 8080))
     print(f"🚀 Flask WEBHOOK MODE запущен на порту {port}")
