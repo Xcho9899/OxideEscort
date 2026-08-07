@@ -2,6 +2,7 @@ import logging
 import requests
 import threading
 import os
+import json
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters, ContextTypes
@@ -22,7 +23,7 @@ def hello():
 def webhook_cryptobot():
     try:
         data = request.get_json()
-        logging.info(f"Webhook received: {data}")
+        logging.info(f"✅ Webhook received: invoice_id={data.get('payload', {}).get('invoice_id')}")
         
         payload = data.get('payload', {})
         
@@ -30,7 +31,7 @@ def webhook_cryptobot():
             invoice_id = str(payload.get('invoice_id'))
             amount_usd = payload.get('amount')
             
-            logging.info(f"Invoice {invoice_id} paid! Amount: {amount_usd}")
+            logging.info(f"💰 Invoice {invoice_id} PAID! Amount: {amount_usd}")
             
             found = False
             for inv_id, inv_data in list(invoices_map.items()):
@@ -46,12 +47,20 @@ def webhook_cryptobot():
                     })
                     
                     invoices_map[inv_id]['status'] = 'paid'
-                    logging.info(f"✅ Payment confirmed for user {user_id}: +{amount_rub}р")
+                    save_invoices()
+                    logging.info(f"✅✅ Payment CONFIRMED for user {user_id}: +{amount_rub}р")
                     found = True
                     break
             
             if not found:
-                logging.warning(f"⚠️ Invoice {invoice_id} not found in memory - but webhook received")
+                logging.warning(f"⚠️ Invoice {invoice_id} not in memory but paid - saving...")
+                invoices_map[invoice_id] = {
+                    'user_id': 0,
+                    'amount_usd': amount_usd,
+                    'status': 'paid',
+                    'created_at': datetime.now().isoformat()
+                }
+                save_invoices()
         
         return jsonify({'ok': True}), 200
     except Exception as e:
@@ -86,6 +95,44 @@ CRYPTOBOT_TOKEN = config.CRYPTO_BOT_TOKEN
 INVOICE_TIMEOUT = 300
 MIN_WITHDRAW = 1
 
+def save_invoices():
+    try:
+        data = {}
+        for k, v in invoices_map.items():
+            data[str(k)] = {
+                'user_id': v.get('user_id'),
+                'amount_usd': v.get('amount_usd'),
+                'status': v.get('status'),
+                'created_at': v.get('created_at').isoformat() if isinstance(v.get('created_at'), datetime) else v.get('created_at')
+            }
+        with open('invoices.json', 'w') as f:
+            json.dump(data, f)
+        logging.info("💾 Invoices saved")
+    except Exception as e:
+        logging.error(f"Error saving invoices: {e}")
+
+def load_invoices():
+    try:
+        if os.path.exists('invoices.json'):
+            with open('invoices.json', 'r') as f:
+                data = json.load(f)
+                loaded = {}
+                for k, v in data.items():
+                    try:
+                        loaded[int(k)] = {
+                            'user_id': v.get('user_id'),
+                            'amount_usd': v.get('amount_usd'),
+                            'status': v.get('status'),
+                            'created_at': datetime.fromisoformat(v.get('created_at')) if v.get('created_at') else datetime.now()
+                        }
+                    except:
+                        pass
+                logging.info(f"📂 Loaded {len(loaded)} invoices")
+                return loaded
+    except Exception as e:
+        logging.error(f"Error loading invoices: {e}")
+    return {}
+
 def cleanup_memory():
     global offers_storage, user_history, invoices_map
     if len(user_history) > 500:
@@ -102,10 +149,13 @@ def cleanup_memory():
         if created_at and (now - created_at).total_seconds() > INVOICE_TIMEOUT:
             if invoice.get('status') != 'paid':
                 expired_invoices.append(invoice_id)
-                logging.info(f"Invoice {invoice_id} expired after 5 minutes")
+                logging.info(f"Invoice {invoice_id} expired")
     
     for invoice_id in expired_invoices:
         del invoices_map[invoice_id]
+    
+    if expired_invoices:
+        save_invoices()
 
 def get_usdt_rub_rate():
     try:
@@ -142,7 +192,7 @@ def create_cryptobot_invoice(amount_usd: float, description: str, user_id: int):
             "expires_in": 3600
         }
         
-        logging.info(f"Creating invoice: {payload}")
+        logging.info(f"Creating invoice: ${amount_usd}")
         
         response = requests.post(
             f"{CRYPTOBOT_API}/createInvoice",
@@ -150,9 +200,6 @@ def create_cryptobot_invoice(amount_usd: float, description: str, user_id: int):
             json=payload,
             timeout=10
         )
-        
-        logging.info(f"Response status: {response.status_code}")
-        logging.info(f"Response: {response.text}")
         
         if response.status_code == 200:
             data = response.json()
@@ -168,6 +215,7 @@ def create_cryptobot_invoice(amount_usd: float, description: str, user_id: int):
                     'created_at': datetime.now()
                 }
                 
+                save_invoices()
                 logging.info(f"Invoice created: {invoice_id}")
                 return pay_url, invoice_id
         return None, None
@@ -222,13 +270,9 @@ def transfer_usdt(amount_usd: float, address: str):
             timeout=10
         )
         
-        logging.info(f"Transfer response status: {response.status_code}")
-        logging.info(f"Transfer response: {response.text}")
-        
         if response.status_code == 200:
             data = response.json()
             if data.get('ok'):
-                logging.info(f"Transfer successful")
                 return True, data.get('result', {})
         
         return False, response.text
@@ -423,7 +467,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 keyboard.append([InlineKeyboardButton(f"❌ Отменить #{offer['id']}", callback_data=f"cancel_{offer['id']}")])
             
             my_categories = set(offer['category'] for offer in my_offers)
-            
             available_cats = [key for key in CATEGORIES.keys() if key not in my_categories]
             
             if available_cats:
@@ -666,6 +709,7 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
         
         invoices_map[invoice_id]['status'] = 'paid'
+        save_invoices()
         
         try:
             await query.edit_message_text(
@@ -752,6 +796,9 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 def main():
+    global invoices_map
+    invoices_map = load_invoices()
+    
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     print(f"🌐 Flask запущен на порту {os.environ.get('PORT', 8080)}")
