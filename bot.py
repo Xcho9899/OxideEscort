@@ -29,15 +29,15 @@ def webhook_cryptobot():
         
         if payload and payload.get('status') == 'paid':
             invoice_id = str(payload.get('invoice_id'))
-            amount_usd = payload.get('amount')
+            amount_usd = float(payload.get('amount', 0))
             
-            logging.info(f"💰 Invoice {invoice_id} PAID! Amount: {amount_usd}")
+            logging.info(f"💰 Invoice {invoice_id} PAID! Amount: ${amount_usd}")
             
             found = False
             for inv_id, inv_data in list(invoices_map.items()):
                 if str(inv_id) == str(invoice_id):
                     user_id = inv_data['user_id']
-                    amount_rub = convert_usd_to_rub(float(amount_usd))
+                    amount_rub = convert_usd_to_rub(amount_usd)
                     
                     user_wallet[user_id] = user_wallet.get(user_id, 0) + amount_rub
                     user_history[user_id].append({
@@ -53,14 +53,25 @@ def webhook_cryptobot():
                     break
             
             if not found:
-                logging.warning(f"⚠️ Invoice {invoice_id} not in memory but paid - saving...")
-                invoices_map[invoice_id] = {
-                    'user_id': 0,
-                    'amount_usd': amount_usd,
-                    'status': 'paid',
-                    'created_at': datetime.now().isoformat()
-                }
-                save_invoices()
+                logging.warning(f"⚠️ Invoice {invoice_id} not in memory - looking in file...")
+                loaded = load_invoices()
+                for inv_id, inv_data in loaded.items():
+                    if str(inv_id) == str(invoice_id):
+                        user_id = inv_data.get('user_id', 0)
+                        if user_id and user_id > 0:
+                            amount_rub = convert_usd_to_rub(amount_usd)
+                            user_wallet[user_id] = user_wallet.get(user_id, 0) + amount_rub
+                            user_history[user_id].append({
+                                'type': 'deposit',
+                                'amount': amount_rub,
+                                'description': f'Платеж ${amount_usd} USD'
+                            })
+                            logging.info(f"✅ Payment from file CONFIRMED for user {user_id}: +{amount_rub}р")
+                            found = True
+                            break
+            
+            if not found:
+                logging.warning(f"⚠️ Invoice {invoice_id} not found anywhere but webhook received - saving anyway")
         
         return jsonify({'ok': True}), 200
     except Exception as e:
@@ -127,7 +138,7 @@ def load_invoices():
                         }
                     except:
                         pass
-                logging.info(f"📂 Loaded {len(loaded)} invoices")
+                logging.info(f"📂 Loaded {len(loaded)} invoices from file")
                 return loaded
     except Exception as e:
         logging.error(f"Error loading invoices: {e}")
