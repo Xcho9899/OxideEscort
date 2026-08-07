@@ -288,7 +288,9 @@ def check_invoice_paid(invoice_id: str):
             if data.get('ok'):
                 invoices = data.get('result', {}).get('items', [])
                 if invoices:
-                    return invoices[0].get('status') == 'paid'
+                    status = invoices[0].get('status')
+                    logger.info(f"Invoice status: {status}")
+                    return status == 'paid'
         return False
     except Exception as e:
         logger.error(f"Check error: {e}")
@@ -401,17 +403,10 @@ async def deposit_amount(message: Message, state: FSMContext):
         if pay_url and invoice_id:
             keyboard = [
                 [InlineKeyboardButton(text="💳 Оплатить", url=pay_url)],
-            ]
-            msg = await message.answer(f"💵 <b>Счет создан!</b>\n\n{amount_rub:.0f}р = ${amount_usd}\n\nОплати счет через CryptoBot:", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
-            await asyncio.sleep(1)
-            keyboard = [
                 [InlineKeyboardButton(text="✅ Проверить платеж", callback_data=f"check_{invoice_id}")],
                 [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
             ]
-            try:
-                await msg.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
-            except TelegramBadRequest:
-                pass
+            await message.answer(f"💵 <b>Счет создан!</b>\n\n{amount_rub:.0f}р = ${amount_usd}\n\n1️⃣ Нажми 'Оплатить'\n2️⃣ Оплати в CryptoBot\n3️⃣ Вернись и нажми 'Проверить платеж'", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
             await state.clear()
         else:
             await message.answer("❌ Ошибка создания счета!", reply_markup=get_main_menu())
@@ -483,7 +478,7 @@ async def withdraw_address(message: Message, state: FSMContext):
             await state.clear()
             return
         
-        logger.info(f"Transferring ${amount_usd} from user {user_id}")
+        logger.info(f"Transferring ${amount_usd} from user {user_id} to {address}")
         success, result = transfer_usdt(amount_usd, address)
         
         if success:
@@ -506,34 +501,47 @@ async def withdraw_address(message: Message, state: FSMContext):
 async def check_payment(query: CallbackQuery):
     await query.answer()
     invoice_id = int(query.data.replace("check_", ""))
+    logger.info(f"User checking payment: {invoice_id}")
+    
     invoice_data = get_invoice(invoice_id)
     if not invoice_data:
+        logger.error(f"Invoice not found: {invoice_id}")
         try:
-            await query.message.edit_text("❌ Счет истек!", reply_markup=get_main_menu())
+            await query.message.edit_text("❌ Счет не найден или истек!", reply_markup=get_main_menu())
         except TelegramBadRequest:
             pass
         return
+    
     user_id, amount_usd, status = invoice_data
+    logger.info(f"Invoice data: user={user_id}, amount={amount_usd}, status={status}")
+    
     if status == 'paid':
+        logger.info(f"Invoice already paid: {invoice_id}")
         try:
-            await query.message.edit_text(f"✅ Оплачено! +${amount_usd}\n\nНовый баланс: {get_wallet(user_id):.0f}р", reply_markup=get_main_menu())
+            await query.message.edit_text(f"✅ Уже оплачено! +${amount_usd}", reply_markup=get_main_menu())
         except TelegramBadRequest:
             pass
         return
+    
+    logger.info(f"Checking with CryptoBot: {invoice_id}")
     is_paid = check_invoice_paid(invoice_id)
+    logger.info(f"CryptoBot result: is_paid={is_paid}")
+    
     if is_paid:
+        logger.info(f"Payment confirmed! Processing: {invoice_id}")
         amount_rub = convert_usd_to_rub(amount_usd)
         new_balance = get_wallet(user_id) + amount_rub
         update_wallet(user_id, new_balance)
         add_history(user_id, 'deposit', amount_rub, f'Платеж ${amount_usd}')
         update_invoice_status(invoice_id, 'paid')
         try:
-            await query.message.edit_text(f"✅ Успешно! +${amount_usd}\n\nНовый баланс: {new_balance:.0f}р", reply_markup=get_main_menu())
+            await query.message.edit_text(f"✅ Платеж прошел!\n\n+${amount_usd}\n💵 Новый баланс: {new_balance:.0f}р", reply_markup=get_main_menu())
         except TelegramBadRequest:
             pass
     else:
+        logger.info(f"Payment NOT confirmed yet: {invoice_id}")
         try:
-            await query.message.edit_text("⏳ Платеж не поступил, проверьте позже", reply_markup=get_main_menu())
+            await query.message.edit_text("⏳ Платеж еще не поступил\n\nПроверьте позже", reply_markup=get_main_menu())
         except TelegramBadRequest:
             pass
 
