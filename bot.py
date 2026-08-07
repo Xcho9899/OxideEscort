@@ -384,10 +384,7 @@ async def wallet_handler(query: CallbackQuery):
 @router.callback_query(F.data == "deposit")
 async def deposit_start(query: CallbackQuery, state: FSMContext):
     await query.answer()
-    try:
-        await query.message.edit_text("💵 <b>Введите сумму (рубли)</b>")
-    except TelegramBadRequest:
-        pass
+    await query.message.answer("💵 <b>Введите сумму (рубли)</b>\n\nМинимум: 81р")
     await state.set_state(DepositStates.amount)
 
 @router.message(StateFilter(DepositStates.amount), F.text)
@@ -396,7 +393,7 @@ async def deposit_amount(message: Message, state: FSMContext):
         amount_rub = float(message.text)
         user_id = message.from_user.id
         if amount_rub < 81:
-            await message.answer("Минимум 81р!", reply_markup=get_main_menu())
+            await message.answer("❌ Минимум 81р!", reply_markup=get_main_menu())
             await state.clear()
             return
         amount_usd = convert_rub_to_usd(amount_rub)
@@ -405,7 +402,7 @@ async def deposit_amount(message: Message, state: FSMContext):
             keyboard = [
                 [InlineKeyboardButton(text="💳 Оплатить", url=pay_url)],
             ]
-            msg = await message.answer(f"💵 <b>Счет создан!</b>\n\n{amount_rub:.0f}р = ${amount_usd}\n\nОплати счет →", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+            msg = await message.answer(f"💵 <b>Счет создан!</b>\n\n{amount_rub:.0f}р = ${amount_usd}\n\nОплати счет через CryptoBot:", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
             await asyncio.sleep(1)
             keyboard = [
                 [InlineKeyboardButton(text="✅ Проверить платеж", callback_data=f"check_{invoice_id}")],
@@ -414,13 +411,13 @@ async def deposit_amount(message: Message, state: FSMContext):
             try:
                 await msg.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
             except TelegramBadRequest:
-                await message.answer("Проверить платеж →", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+                pass
             await state.clear()
         else:
-            await message.answer("Ошибка создания счета!", reply_markup=get_main_menu())
+            await message.answer("❌ Ошибка создания счета!", reply_markup=get_main_menu())
             await state.clear()
     except ValueError:
-        await message.answer("Введите число!", reply_markup=get_main_menu())
+        await message.answer("❌ Введите число!", reply_markup=get_main_menu())
         await state.clear()
 
 @router.callback_query(F.data == "withdraw")
@@ -436,10 +433,7 @@ async def withdraw_start(query: CallbackQuery, state: FSMContext):
         except TelegramBadRequest:
             pass
     else:
-        try:
-            await query.message.edit_text(f"💰 <b>Введите сумму в USD</b>\n\nБаланс: ${balance_usd:.2f}")
-        except TelegramBadRequest:
-            pass
+        await query.message.answer(f"💰 <b>Введите сумму в USD</b>\n\nБаланс: ${balance_usd:.2f}\nМинимум: $1")
         await state.set_state(WithdrawStates.amount)
 
 @router.message(StateFilter(WithdrawStates.amount), F.text)
@@ -452,20 +446,20 @@ async def withdraw_amount(message: Message, state: FSMContext):
         balance_usd = balance / rate if rate else 0
         
         if amount_usd < 1:
-            await message.answer("Минимум $1!", reply_markup=get_main_menu())
+            await message.answer("❌ Минимум $1!", reply_markup=get_main_menu())
             await state.clear()
             return
         
         if amount_usd > balance_usd:
-            await message.answer(f"Недостаточно средств!\n\nБаланс: ${balance_usd:.2f}", reply_markup=get_main_menu())
+            await message.answer(f"❌ Недостаточно средств!\n\nБаланс: ${balance_usd:.2f}", reply_markup=get_main_menu())
             await state.clear()
             return
         
         await state.update_data(withdraw_amount=amount_usd)
-        await message.answer("Введите TRC-20 адрес (начинается с T)")
+        await message.answer("💰 Введите TRC-20 адрес\n\n(начинается с T, 34 символа)")
         await state.set_state(WithdrawStates.address)
     except ValueError:
-        await message.answer("Введите число!", reply_markup=get_main_menu())
+        await message.answer("❌ Введите число!", reply_markup=get_main_menu())
         await state.clear()
 
 @router.message(StateFilter(WithdrawStates.address), F.text)
@@ -473,7 +467,7 @@ async def withdraw_address(message: Message, state: FSMContext):
     try:
         address = message.text.strip()
         if not (len(address) == 34 and address.startswith('T')):
-            await message.answer("❌ Неверный TRC-20 адрес! (должен начинаться с T и содержать 34 символа)", reply_markup=get_main_menu())
+            await message.answer("❌ Неверный адрес! (T + 34 символа)", reply_markup=get_main_menu())
             await state.clear()
             return
         
@@ -495,11 +489,11 @@ async def withdraw_address(message: Message, state: FSMContext):
         if success:
             new_balance = balance - amount_rub
             update_wallet(user_id, new_balance)
-            add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd} на {address[:10]}...')
-            await message.answer(f"✅ Отправлено ${amount_usd} на {address}\n\nНовый баланс: {new_balance:.0f}р", reply_markup=get_main_menu())
+            add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd}')
+            await message.answer(f"✅ Отправлено ${amount_usd}\n\nНовый баланс: {new_balance:.0f}р", reply_markup=get_main_menu())
             logger.info(f"Transfer success: ${amount_usd}")
         else:
-            await message.answer(f"❌ Ошибка перевода!\n\n{result}\n\nПопробуйте позже.", reply_markup=get_main_menu())
+            await message.answer(f"❌ Ошибка!\n\n{result}", reply_markup=get_main_menu())
             logger.error(f"Transfer failed: {result}")
         
         await state.clear()
@@ -515,14 +509,14 @@ async def check_payment(query: CallbackQuery):
     invoice_data = get_invoice(invoice_id)
     if not invoice_data:
         try:
-            await query.message.edit_text("Счет истек!", reply_markup=get_main_menu())
+            await query.message.edit_text("❌ Счет истек!", reply_markup=get_main_menu())
         except TelegramBadRequest:
             pass
         return
     user_id, amount_usd, status = invoice_data
     if status == 'paid':
         try:
-            await query.message.edit_text(f"✅ Оплачено! +${amount_usd}", reply_markup=get_main_menu())
+            await query.message.edit_text(f"✅ Оплачено! +${amount_usd}\n\nНовый баланс: {get_wallet(user_id):.0f}р", reply_markup=get_main_menu())
         except TelegramBadRequest:
             pass
         return
@@ -534,12 +528,12 @@ async def check_payment(query: CallbackQuery):
         add_history(user_id, 'deposit', amount_rub, f'Платеж ${amount_usd}')
         update_invoice_status(invoice_id, 'paid')
         try:
-            await query.message.edit_text(f"✅ Успешно! +${amount_usd} USD\n\nНовый баланс: {new_balance:.0f}р", reply_markup=get_main_menu())
+            await query.message.edit_text(f"✅ Успешно! +${amount_usd}\n\nНовый баланс: {new_balance:.0f}р", reply_markup=get_main_menu())
         except TelegramBadRequest:
             pass
     else:
         try:
-            await query.message.edit_text("⏳ Ожидание платежа...", reply_markup=get_main_menu())
+            await query.message.edit_text("⏳ Платеж не поступил, проверьте позже", reply_markup=get_main_menu())
         except TelegramBadRequest:
             pass
 
@@ -552,13 +546,13 @@ async def my_offers_handler(query: CallbackQuery):
         text = "📊 Мои предложения:\n\n"
         for offer in my_offers:
             price_rub = convert_usd_to_rub(offer['price'])
-            text += f"💰 {offer['quantity']} = ${offer['price']} (≈{price_rub:.0f}р)\n"
+            text += f"{offer['quantity']} = ${offer['price']} (≈{price_rub:.0f}р)\n"
         keyboard = []
         for offer in my_offers:
             keyboard.append([InlineKeyboardButton(text=f"❌ #{offer['id']}", callback_data=f"cancel_{offer['id']}")])
         keyboard.append([InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")])
     else:
-        text = "📭 Предложений нет"
+        text = "📭 Нет предложений"
         keyboard = [[InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]]
     try:
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
@@ -587,7 +581,7 @@ async def history_handler(query: CallbackQuery):
     user_id = query.from_user.id
     transactions = get_history(user_id, 10)
     if not transactions:
-        text = "История пуста"
+        text = "📜 История пуста"
     else:
         text = "📜 История:\n\n"
         for trans in transactions:
@@ -619,11 +613,10 @@ async def cancel_offer(query: CallbackQuery):
     offer_id = int(query.data.replace("cancel_", ""))
     user_id = query.from_user.id
     if offer_id in offers_storage:
-        offer = offers_storage[offer_id]
-        if offer['author_id'] == user_id:
+        if offers_storage[offer_id]['author_id'] == user_id:
             del offers_storage[offer_id]
             try:
-                await query.message.edit_text(f"✅ Отменено", reply_markup=get_main_menu())
+                await query.message.edit_text("✅ Отменено", reply_markup=get_main_menu())
             except TelegramBadRequest:
                 pass
 
@@ -647,9 +640,8 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
     await site.start()
-    logger.info("✅ PostgreSQL connection pool created")
-    logger.info("✅ Database tables created")
-    logger.info("✅ Database: PostgreSQL")
+    logger.info("✅ PostgreSQL")
+    logger.info("✅ Database")
     while True:
         await asyncio.sleep(3600)
 
