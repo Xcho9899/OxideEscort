@@ -401,16 +401,23 @@ async def deposit_amount(message: Message, state: FSMContext):
             return
         amount_usd = convert_rub_to_usd(amount_rub)
         pay_url, invoice_id = create_cryptobot_invoice(amount_usd, "Пополнение", user_id)
-        if pay_url:
+        if pay_url and invoice_id:
             keyboard = [
                 [InlineKeyboardButton(text="💳 Оплатить", url=pay_url)],
-                [InlineKeyboardButton(text="✅ Проверить", callback_data=f"check_{invoice_id}")],
+            ]
+            msg = await message.answer(f"💵 <b>Счет создан!</b>\n\n{amount_rub:.0f}р = ${amount_usd}\n\nОплати счет →", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+            await asyncio.sleep(1)
+            keyboard = [
+                [InlineKeyboardButton(text="✅ Проверить платеж", callback_data=f"check_{invoice_id}")],
                 [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
             ]
-            await message.answer(f"Счет: {amount_rub:.0f}р = ${amount_usd}", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+            try:
+                await msg.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+            except TelegramBadRequest:
+                await message.answer("Проверить платеж →", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
             await state.clear()
         else:
-            await message.answer("Ошибка!", reply_markup=get_main_menu())
+            await message.answer("Ошибка создания счета!", reply_markup=get_main_menu())
             await state.clear()
     except ValueError:
         await message.answer("Введите число!", reply_markup=get_main_menu())
