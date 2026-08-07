@@ -5,6 +5,7 @@ import json
 import asyncio
 from aiohttp import web
 from aiogram import Bot, Dispatcher, Router, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.types import Update, Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
@@ -65,7 +66,10 @@ CATEGORIES = {
 }
 
 # === ИНИЦИАЛИЗАЦИЯ AIOGRAM 3 ===
-bot = Bot(token=BOT_TOKEN, default={"parse_mode": ParseMode.HTML})
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
@@ -258,6 +262,7 @@ def get_main_menu():
 
 @router.message(CommandStart())
 async def start(message: Message):
+    logger.info(f"✅ START from user {message.from_user.id}")
     user_id = message.from_user.id
     if user_id not in user_wallet:
         user_wallet[user_id] = 0
@@ -713,6 +718,7 @@ async def main():
     
     # Подключить диспетчер (вызывает initialize() автоматически!)
     setup_application(app, dp, bot=bot)
+    logger.info("✅ Webhook handler registered")
     
     # Запустить сервер
     runner = web.AppRunner(app)
