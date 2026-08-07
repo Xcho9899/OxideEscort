@@ -2,20 +2,17 @@ import logging
 import requests
 import os
 import json
-from flask import Flask, request, jsonify
+import asyncio
+from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters, ContextTypes
 from telegram.error import BadRequest
+from telegram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from datetime import datetime, timedelta
 import config
-import asyncio
 
 logging.basicConfig(level=logging.INFO)
 
-flask_app = Flask(__name__)
-bot = Bot(token=config.TELEGRAM_TOKEN)
-
-app = None
 invoices_map = {}
 offers_storage = {}
 offer_counter = 1
@@ -44,61 +41,11 @@ CRYPTOBOT_TOKEN = config.CRYPTO_BOT_TOKEN
 INVOICE_TIMEOUT = 300
 MIN_WITHDRAW = 1
 
-@flask_app.route('/')
-def hello():
-    return 'OxideEscort Bot is running!', 200
-
-@flask_app.route('/webhook/telegram', methods=['POST'])
-def webhook_telegram():
-    try:
-        data = request.get_json()
-        update = Update.de_json(data, bot)
-        asyncio.run(app.process_update(update))
-        return jsonify({'ok': True}), 200
-    except Exception as e:
-        logging.error(f"Telegram webhook error: {e}")
-        return jsonify({'ok': False}), 500
-
-@flask_app.route('/webhook/cryptobot', methods=['POST'])
-def webhook_cryptobot():
-    try:
-        data = request.get_json()
-        logging.info(f"✅ CryptoBot Webhook received")
-        
-        payload = data.get('payload', {})
-        
-        if payload and payload.get('status') == 'paid':
-            invoice_id = str(payload.get('invoice_id'))
-            amount_usd = float(payload.get('amount', 0))
-            
-            logging.info(f"💰 Invoice {invoice_id} PAID! Amount: ${amount_usd}")
-            
-            found = False
-            for inv_id, inv_data in list(invoices_map.items()):
-                if str(inv_id) == str(invoice_id):
-                    user_id = inv_data['user_id']
-                    amount_rub = convert_usd_to_rub(amount_usd)
-                    user_wallet[user_id] = user_wallet.get(user_id, 0) + amount_rub
-                    user_history[user_id].append({'type': 'deposit', 'amount': amount_rub, 'description': f'Платеж ${amount_usd} USD'})
-                    invoices_map[inv_id]['status'] = 'paid'
-                    save_invoices()
-                    save_invoice_user_map(invoice_id, user_id)
-                    logging.info(f"✅✅ CONFIRMED user {user_id}: +{amount_rub}р")
-                    found = True
-                    break
-            
-            if not found:
-                user_id = load_invoice_user(invoice_id)
-                if user_id:
-                    amount_rub = convert_usd_to_rub(amount_usd)
-                    user_wallet[user_id] = user_wallet.get(user_id, 0) + amount_rub
-                    user_history[user_id].append({'type': 'deposit', 'amount': amount_rub, 'description': f'Платеж ${amount_usd} USD'})
-                    logging.info(f"✅ CONFIRMED from file user {user_id}: +{amount_rub}р")
-        
-        return jsonify({'ok': True}), 200
-    except Exception as e:
-        logging.error(f"❌ CryptoBot Webhook error: {e}")
-        return jsonify({'ok': False}), 500
+WEBHOOK_URL = "/webhook/telegram"
+WEBHOOK_HOST = "oxideescort-3.onrender.com"
+BASE_WEBHOOK_URL = f"https://{WEBHOOK_HOST}"
+WEB_SERVER_HOST = "0.0.0.0"
+WEB_SERVER_PORT = int(os.environ.get('PORT', 8080))
 
 def save_invoice_user_map(invoice_id, user_id):
     try:
@@ -685,25 +632,31 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ *Создано!*\n\n{CATEGORIES[category]}\n📊 {quantity} {unit}\n💰 ${price} USD (≈{price_rub:.0f}р)", reply_markup=get_main_menu(), parse_mode="Markdown")
     return ConversationHandler.END
 
-async def setup_webhook():
+async def on_startup(bot: Bot) -> None:
+    """Установить webhook при запуске"""
     try:
         await bot.delete_webhook()
         logging.info("✅ Old webhook deleted")
         
-        webhook_url = "https://oxideescort-3.onrender.com/webhook/telegram"
+        webhook_url = f"{BASE_WEBHOOK_URL}{WEBHOOK_URL}"
         await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
         logging.info(f"✅ Telegram webhook set: {webhook_url}")
     except Exception as e:
         logging.error(f"Error setting webhook: {e}")
 
-def main():
-    global app, invoices_map
+async def main():
+    # Загрузить данные
+    global invoices_map
+    invoices_map.update(load_invoices())
     
-    invoices_map = load_invoices()
+    # Создать бота
+    bot = Bot(token=config.TELEGRAM_TOKEN)
     
-    app = Application.builder().token(config.TELEGRAM_TOKEN).build()
+    # Создать Application (Dispatcher)
+    application = Application.builder().token(config.TELEGRAM_TOKEN).build()
     
-    app.add_handler(CommandHandler("start", start))
+    # Добавить handlers
+    application.add_handler(CommandHandler("start", start))
     
     deposit_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="deposit")],
@@ -732,28 +685,43 @@ def main():
         per_message=True
     )
     
-    app.add_handler(deposit_conv)
-    app.add_handler(withdraw_conv)
-    app.add_handler(quantity_conv)
-    app.add_handler(CallbackQueryHandler(check_payment, pattern="check_"))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(deposit_conv)
+    application.add_handler(withdraw_conv)
+    application.add_handler(quantity_conv)
+    application.add_handler(CallbackQueryHandler(check_payment, pattern="check_"))
+    application.add_handler(CallbackQueryHandler(button_handler))
     
-    # КЛЮЧ: Один loop для всего!
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # Создать aiohttp app
+    app = web.Application()
     
-    # Инициализировать в этом loop (NOT закрывает loop!)
-    loop.run_until_complete(app.initialize())
-    loop.run_until_complete(setup_webhook())
+    # Регистрировать webhook handler
+    webhook_requests_handler = SimpleRequestHandler(
+        dispatcher=application,
+        bot=bot,
+    )
+    webhook_requests_handler.register(app, path=WEBHOOK_URL)
     
-    port = int(os.environ.get('PORT', 8080))
-    print(f"🚀 Flask WEBHOOK MODE запущен на порту {port}")
-    print("✅ Telegram: /webhook/telegram")
-    print("✅ CryptoBot: /webhook/cryptobot")
-    print("❌ БЕЗ POLLING - конфликтов НЕ БУДЕТ!")
+    # Инициализировать приложение
+    setup_application(app, application, bot=bot)
     
-    # Flask использует СУЩЕСТВУЮЩИЙ loop для asyncio.run()
-    flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    # Хук для установки webhook при старте
+    async def on_startup_handler(app):
+        await on_startup(bot)
+    
+    app.on_startup.append(on_startup_handler)
+    
+    # Запустить сервер
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, WEB_SERVER_HOST, WEB_SERVER_PORT)
+    await site.start()
+    
+    print(f"🚀 Webhook server started on {WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
+    print(f"✅ Webhook URL: {BASE_WEBHOOK_URL}{WEBHOOK_URL}")
+    
+    # Держать сервер запущенным
+    while True:
+        await asyncio.sleep(3600)
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    asyncio.run(main())
