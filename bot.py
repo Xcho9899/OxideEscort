@@ -685,15 +685,21 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def setup_webhook():
-    """Один раз установить webhook для Telegram"""
+    """Установить webhook для Telegram один раз"""
     try:
-        webhook_url = "https://oxideescort-3.onrender.com/webhook/telegram"
-        await bot.set_webhook(url=webhook_url)
+        # Сначала удалить старый webhook
+        await bot.delete_webhook()
+        logging.info("✅ Old webhook deleted")
+        
+        # Затем установить новый
+        webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'oxideescort-3.onrender.com')}/webhook/telegram"
+        await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
         logging.info(f"✅ Telegram webhook set: {webhook_url}")
     except Exception as e:
         logging.error(f"Error setting webhook: {e}")
 
-def main():
+async def init_app():
+    """Инициализировать приложение"""
     global invoices_map, app
     invoices_map = load_invoices()
     
@@ -731,12 +737,17 @@ def main():
     app.add_handler(CallbackQueryHandler(check_payment, pattern="check_"))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    # Установить webhook один раз
-    asyncio.run(setup_webhook())
+    # Установить webhook
+    await setup_webhook()
+
+def main():
+    asyncio.run(init_app())
     
     port = int(os.environ.get('PORT', 8080))
-    print(f"🚀 Flask запущен на порту {port}")
-    print("✅ Webhook mode (NO POLLING)")
+    print(f"🚀 Flask WEBHOOK MODE запущен на порту {port}")
+    print("✅ Telegram: /webhook/telegram")
+    print("✅ CryptoBot: /webhook/cryptobot")
+    print("❌ БЕЗ POLLING - конфликтов НЕ БУДЕТ!")
     flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 if __name__ == '__main__':
