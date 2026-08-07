@@ -193,6 +193,7 @@ def update_wallet(user_id, amount):
         ON CONFLICT (user_id) DO UPDATE SET balance = %s
         ''', (user_id, amount, amount))
         conn.commit()
+        logger.info(f"✅ Wallet updated: {user_id}")
         return True
     except Exception as e:
         logger.error(f"❌ Wallet error: {e}")
@@ -292,6 +293,26 @@ def check_invoice_paid(invoice_id: str):
     except Exception as e:
         logger.error(f"Check error: {e}")
         return False
+
+def transfer_usdt(amount_usd: float, address: str):
+    try:
+        logger.info(f"Transfer: ${amount_usd} to {address}")
+        headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN, "Content-Type": "application/json"}
+        payload = {"asset": "USDT", "amount": str(amount_usd), "address": address, "network": "tron"}
+        logger.info(f"Transfer payload: {payload}")
+        response = requests.post(f"{CRYPTOBOT_API}/transfer", headers=headers, json=payload, timeout=10)
+        logger.info(f"Transfer status: {response.status_code}")
+        logger.info(f"Transfer response: {response.text}")
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('ok'):
+                logger.info(f"Transfer success: {data}")
+                return True, data.get('result')
+        logger.error(f"Transfer failed: {response.text}")
+        return False, response.text
+    except Exception as e:
+        logger.error(f"Transfer error: {e}")
+        return False, str(e)
 
 def get_main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -401,7 +422,7 @@ async def withdraw_start(query: CallbackQuery, state: FSMContext):
     user_id = query.from_user.id
     rate = get_usdt_rub_rate()
     balance = get_wallet(user_id)
-    balance_usd = balance / rate
+    balance_usd = balance / rate if rate else 0
     if balance_usd < 1:
         try:
             await query.message.edit_text(f"❌ Минимум $1 USD\n\nБаланс: ${balance_usd:.2f}", reply_markup=get_main_menu())
@@ -418,15 +439,26 @@ async def withdraw_start(query: CallbackQuery, state: FSMContext):
 async def withdraw_amount(message: Message, state: FSMContext):
     try:
         amount_usd = float(message.text)
+        user_id = message.from_user.id
+        rate = get_usdt_rub_rate()
+        balance = get_wallet(user_id)
+        balance_usd = balance / rate if rate else 0
+        
         if amount_usd < 1:
             await message.answer("Минимум $1!", reply_markup=get_main_menu())
             await state.clear()
             return
+        
+        if amount_usd > balance_usd:
+            await message.answer(f"Недостаточно средств!\n\nБаланс: ${balance_usd:.2f}", reply_markup=get_main_menu())
+            await state.clear()
+            return
+        
         await state.update_data(withdraw_amount=amount_usd)
-        await message.answer("Введите TRC-20 адрес")
+        await message.answer("Введите TRC-20 адрес (начинается с T)")
         await state.set_state(WithdrawStates.address)
     except ValueError:
-        await message.answer("Число!", reply_markup=get_main_menu())
+        await message.answer("Введите число!", reply_markup=get_main_menu())
         await state.clear()
 
 @router.message(StateFilter(WithdrawStates.address), F.text)
@@ -434,21 +466,39 @@ async def withdraw_address(message: Message, state: FSMContext):
     try:
         address = message.text.strip()
         if not (len(address) == 34 and address.startswith('T')):
-            await message.answer("Неверный TRC-20 адрес!", reply_markup=get_main_menu())
+            await message.answer("❌ Неверный TRC-20 адрес! (должен начинаться с T и содержать 34 символа)", reply_markup=get_main_menu())
             await state.clear()
             return
+        
         user_id = message.from_user.id
         data = await state.get_data()
         amount_usd = data.get('withdraw_amount')
+        rate = get_usdt_rub_rate()
         amount_rub = convert_usd_to_rub(amount_usd)
-        new_balance = get_wallet(user_id) - amount_rub
-        update_wallet(user_id, new_balance)
-        add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd}')
-        await message.answer(f"✅ Отправлено ${amount_usd}", reply_markup=get_main_menu())
+        balance = get_wallet(user_id)
+        
+        if balance < amount_rub:
+            await message.answer(f"❌ Недостаточно средств!\n\nБаланс: {balance:.0f}р", reply_markup=get_main_menu())
+            await state.clear()
+            return
+        
+        logger.info(f"Transferring ${amount_usd} from user {user_id}")
+        success, result = transfer_usdt(amount_usd, address)
+        
+        if success:
+            new_balance = balance - amount_rub
+            update_wallet(user_id, new_balance)
+            add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd} на {address[:10]}...')
+            await message.answer(f"✅ Отправлено ${amount_usd} на {address}\n\nНовый баланс: {new_balance:.0f}р", reply_markup=get_main_menu())
+            logger.info(f"Transfer success: ${amount_usd}")
+        else:
+            await message.answer(f"❌ Ошибка перевода!\n\n{result}\n\nПопробуйте позже.", reply_markup=get_main_menu())
+            logger.error(f"Transfer failed: {result}")
+        
         await state.clear()
     except Exception as e:
         logger.error(f"Withdraw error: {e}")
-        await message.answer("Ошибка!", reply_markup=get_main_menu())
+        await message.answer("❌ Ошибка!", reply_markup=get_main_menu())
         await state.clear()
 
 @router.callback_query(F.data.startswith("check_"))
@@ -477,7 +527,7 @@ async def check_payment(query: CallbackQuery):
         add_history(user_id, 'deposit', amount_rub, f'Платеж ${amount_usd}')
         update_invoice_status(invoice_id, 'paid')
         try:
-            await query.message.edit_text(f"✅ Успешно! +${amount_usd} USD", reply_markup=get_main_menu())
+            await query.message.edit_text(f"✅ Успешно! +${amount_usd} USD\n\nНовый баланс: {new_balance:.0f}р", reply_markup=get_main_menu())
         except TelegramBadRequest:
             pass
     else:
@@ -532,7 +582,7 @@ async def history_handler(query: CallbackQuery):
     if not transactions:
         text = "История пуста"
     else:
-        text = "История:\n\n"
+        text = "📜 История:\n\n"
         for trans in transactions:
             text += f"{trans}\n"
     try:
@@ -544,7 +594,7 @@ async def history_handler(query: CallbackQuery):
 async def help_handler(query: CallbackQuery):
     await query.answer()
     try:
-        await query.message.edit_text("❓ Маркетплейс Oxide\n\n💰 Комиссия 5%", reply_markup=get_main_menu())
+        await query.message.edit_text("❓ Маркетплейс Oxide\n\n💰 Комиссия 5%\n💵 USDT TRC-20", reply_markup=get_main_menu())
     except TelegramBadRequest:
         pass
 
