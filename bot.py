@@ -696,8 +696,9 @@ async def setup_webhook():
     except Exception as e:
         logging.error(f"Error setting webhook: {e}")
 
-async def init_and_start():
+def main():
     global app, invoices_map
+    
     invoices_map = load_invoices()
     
     app = Application.builder().token(config.TELEGRAM_TOKEN).build()
@@ -737,11 +738,8 @@ async def init_and_start():
     app.add_handler(CallbackQueryHandler(check_payment, pattern="check_"))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    await app.initialize()
-    await setup_webhook()
-
-def main():
-    asyncio.run(init_and_start())
+    asyncio.run(app.initialize())
+    asyncio.run(setup_webhook())
     
     port = int(os.environ.get('PORT', 8080))
     print(f"🚀 Flask WEBHOOK MODE запущен на порту {port}")
