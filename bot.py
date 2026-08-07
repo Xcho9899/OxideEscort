@@ -128,17 +128,39 @@ def create_cryptobot_invoice(amount_usd: float, description: str, user_id: int):
 
 def check_invoice_paid(invoice_id: str):
     try:
-        headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN, "Content-Type": "application/json"}
-        response = requests.get(f"{CRYPTOBOT_API}/getInvoices?invoice_ids={invoice_id}", headers=headers, timeout=10)
+        logger.info(f"🔵 Checking invoice: {invoice_id}")
+        headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN}
+        url = f"{CRYPTOBOT_API}/getInvoices?invoice_ids={invoice_id}"
+        
+        logger.info(f"🔵 Check URL: {url}")
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        logger.info(f"🔵 Check response status: {response.status_code}")
+        logger.info(f"🔵 Check response body: {response.text}")
+        
         if response.status_code == 200:
             data = response.json()
+            logger.info(f"🔵 Check response data: {data}")
+            
             if data.get('ok'):
                 invoices = data.get('result', {}).get('items', [])
+                logger.info(f"🔵 Found invoices: {len(invoices)}")
+                
                 if invoices:
-                    return invoices[0].get('status') == 'paid'
+                    status = invoices[0].get('status')
+                    logger.info(f"🔵 Invoice status: {status}")
+                    return status == 'paid'
+            else:
+                logger.error(f"❌ API check returned ok=False: {data}")
+        else:
+            logger.error(f"❌ Check status {response.status_code}")
+        
         return False
     except Exception as e:
-        logger.error(f"Error checking invoice: {e}")
+        logger.error(f"❌ Error checking invoice: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 def transfer_usdt(amount_usd: float, address: str):
@@ -353,23 +375,32 @@ async def withdraw_address(message: Message, state: FSMContext):
 async def check_payment(query: CallbackQuery):
     await query.answer()
     invoice_id = query.data.replace("check_", "")
+    logger.info(f"🔵 CHECK PAYMENT - invoice: {invoice_id}")
+    
     if invoice_id not in invoices_map:
+        logger.info(f"❌ Invoice not in map: {invoice_id}")
         try:
             await query.message.edit_text("❌ <b>Счет истек!</b>\n\nВремя на оплату составляет 5 минут. Создайте новый счет.", reply_markup=get_main_menu())
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
                 logger.error(f"Error: {e}")
         return
+    
     invoice = invoices_map[invoice_id]
     if invoice.get('status') == 'paid':
+        logger.info(f"✅ Invoice already paid: {invoice_id}")
         try:
             await query.message.edit_text(f"✅ <b>Платеж уже обработан!</b>\n\n💰 +${invoice['amount_usd']} USD\n💵 +{convert_usd_to_rub(invoice['amount_usd']):.0f}р\n\nПроверьте баланс в Кошельке!", reply_markup=get_main_menu())
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
                 logger.error(f"Error: {e}")
         return
+    
     is_paid = check_invoice_paid(invoice_id)
+    logger.info(f"🔵 is_paid result: {is_paid}")
+    
     if is_paid:
+        logger.info(f"✅ Payment confirmed: {invoice_id}")
         user_id = invoice['user_id']
         amount_usd = invoice['amount_usd']
         amount_rub = convert_usd_to_rub(amount_usd)
@@ -382,6 +413,7 @@ async def check_payment(query: CallbackQuery):
             if "message is not modified" not in str(e):
                 logger.error(f"Error: {e}")
     else:
+        logger.info(f"⏳ Payment not yet confirmed: {invoice_id}")
         try:
             await query.message.edit_text("⏳ <b>Платеж еще не поступил</b>\n\nПожалуйста подождите или проверьте позже.", reply_markup=get_main_menu())
         except TelegramBadRequest as e:
