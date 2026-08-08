@@ -37,7 +37,7 @@ class DepositStates(StatesGroup):
 class WithdrawStates(StatesGroup):
     amount = State()
 
-class OfferStates(StatesGroup):
+class CreateOfferStates(StatesGroup):
     category = State()
     quantity = State()
     price = State()
@@ -53,9 +53,6 @@ CATEGORIES = {
     "install_turrets": "🔫 Установка турелей",
     "hide_cabinet": "🚪 Скидка шкафа",
 }
-
-offers_storage = {}
-offer_counter = 1
 
 try:
     db_pool = psycopg2.pool.SimpleConnectionPool(1, 20, DATABASE_URL)
@@ -109,6 +106,17 @@ def init_db():
             amount_usd DECIMAL(10, 2),
             status VARCHAR(50),
             check_id VARCHAR(255),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS offers (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            category VARCHAR(50),
+            quantity VARCHAR(255),
+            price DECIMAL(10, 2),
+            status VARCHAR(50) DEFAULT 'active',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
@@ -232,6 +240,23 @@ def add_history(user_id, type_str, amount, description):
         cursor.close()
         return_db(conn)
 
+def get_history(user_id, limit=10):
+    conn = get_db()
+    if not conn:
+        return []
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        SELECT description FROM user_history 
+        WHERE user_id = %s ORDER BY created_at DESC LIMIT %s
+        ''', (user_id, limit))
+        return [row[0] for row in cursor.fetchall()]
+    except:
+        return []
+    finally:
+        cursor.close()
+        return_db(conn)
+
 def save_withdrawal(user_id, amount_usd, status, check_id=None):
     conn = get_db()
     if not conn:
@@ -253,19 +278,79 @@ def save_withdrawal(user_id, amount_usd, status, check_id=None):
         cursor.close()
         return_db(conn)
 
-def get_history(user_id, limit=10):
+def save_offer(user_id, category, quantity, price):
+    conn = get_db()
+    if not conn:
+        return None
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        INSERT INTO offers (user_id, category, quantity, price, status)
+        VALUES (%s, %s, %s, %s, %s)
+        RETURNING id
+        ''', (user_id, category, quantity, price, 'active'))
+        offer_id = cursor.fetchone()[0]
+        conn.commit()
+        logger.info(f"✅ Offer saved: id={offer_id}, user={user_id}")
+        return offer_id
+    except Exception as e:
+        logger.error(f"❌ Offer save error: {e}")
+        conn.rollback()
+        return None
+    finally:
+        cursor.close()
+        return_db(conn)
+
+def get_offers_by_category(category):
     conn = get_db()
     if not conn:
         return []
     cursor = conn.cursor()
     try:
         cursor.execute('''
-        SELECT description FROM user_history 
-        WHERE user_id = %s ORDER BY created_at DESC LIMIT %s
-        ''', (user_id, limit))
-        return [row[0] for row in cursor.fetchall()]
+        SELECT id, user_id, quantity, price::double precision FROM offers 
+        WHERE category = %s AND status = %s
+        ORDER BY created_at DESC
+        ''', (category, 'active'))
+        return cursor.fetchall()
     except:
         return []
+    finally:
+        cursor.close()
+        return_db(conn)
+
+def get_user_offers(user_id):
+    conn = get_db()
+    if not conn:
+        return []
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        SELECT id, category, quantity, price::double precision FROM offers 
+        WHERE user_id = %s AND status = %s
+        ORDER BY created_at DESC
+        ''', (user_id, 'active'))
+        return cursor.fetchall()
+    except:
+        return []
+    finally:
+        cursor.close()
+        return_db(conn)
+
+def delete_offer(offer_id, user_id):
+    conn = get_db()
+    if not conn:
+        return False
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM offers WHERE id = %s AND user_id = %s", (offer_id, user_id))
+        conn.commit()
+        logger.info(f"✅ Offer deleted: {offer_id}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Delete error: {e}")
+        conn.rollback()
+        return False
     finally:
         cursor.close()
         return_db(conn)
@@ -374,8 +459,8 @@ def create_check(amount_usd: float, user_id: int):
 def get_main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛍️ Доска услуг", callback_data="board")],
-        [InlineKeyboardButton(text="📊 Мои предложения", callback_data="my_offers")],
-        [InlineKeyboardButton(text="📋 Мои сделки", callback_data="my_deals")],
+        [InlineKeyboardButton(text="📝 Создать объявление", callback_data="create_offer")],
+        [InlineKeyboardButton(text="📊 Мои объявления", callback_data="my_offers")],
         [InlineKeyboardButton(text="👤 Мой профиль", callback_data="profile")],
         [InlineKeyboardButton(text="💳 Кошелек", callback_data="wallet")],
         [InlineKeyboardButton(text="📜 История", callback_data="history")],
@@ -403,7 +488,7 @@ async def board_handler(query: CallbackQuery):
 async def category_handler(query: CallbackQuery):
     await query.answer()
     category = query.data.replace("cat_", "")
-    offers = [o for o in offers_storage.values() if o['category'] == category]
+    offers = get_offers_by_category(category)
     if not offers:
         keyboard = [[InlineKeyboardButton(text="⬅️ Назад", callback_data="board")]]
         try:
@@ -412,14 +497,102 @@ async def category_handler(query: CallbackQuery):
             pass
     else:
         keyboard = []
-        for offer in offers:
-            price_rub = convert_usd_to_rub(offer['price'])
-            keyboard.append([InlineKeyboardButton(text=f"💰 {offer['quantity']} = ${offer['price']} (≈{price_rub:.0f}р)", callback_data=f"offer_{offer['id']}")])
+        for offer_id, user_id, quantity, price in offers:
+            price_rub = convert_usd_to_rub(price)
+            keyboard.append([InlineKeyboardButton(text=f"💰 {quantity} = ${price} (≈{price_rub:.0f}р)", callback_data=f"view_{offer_id}")])
         keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="board")])
         try:
             await query.message.edit_text(f"📊 <b>{CATEGORIES[category]}</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
         except TelegramBadRequest:
             pass
+
+@router.callback_query(F.data == "create_offer")
+async def create_offer_start(query: CallbackQuery, state: FSMContext):
+    await query.answer()
+    keyboard = []
+    for key, name in CATEGORIES.items():
+        keyboard.append([InlineKeyboardButton(text=name, callback_data=f"offer_cat_{key}")])
+    keyboard.append([InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")])
+    try:
+        await query.message.edit_text("📝 <b>Выберите категорию</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    except TelegramBadRequest:
+        pass
+
+@router.callback_query(F.data.startswith("offer_cat_"))
+async def create_offer_category(query: CallbackQuery, state: FSMContext):
+    await query.answer()
+    category = query.data.replace("offer_cat_", "")
+    await state.update_data(category=category)
+    await query.message.answer("📝 <b>Введите количество</b>\n\nНапример: 100, 50, 1000")
+    await state.set_state(CreateOfferStates.quantity)
+
+@router.message(StateFilter(CreateOfferStates.quantity), F.text)
+async def create_offer_quantity(message: Message, state: FSMContext):
+    quantity = message.text.strip()
+    await state.update_data(quantity=quantity)
+    await message.answer("💰 <b>Введите цену в USD</b>\n\nНапример: 10, 50, 100")
+    await state.set_state(CreateOfferStates.price)
+
+@router.message(StateFilter(CreateOfferStates.price), F.text)
+async def create_offer_price(message: Message, state: FSMContext):
+    try:
+        price = float(message.text)
+        data = await state.get_data()
+        category = data.get('category')
+        quantity = data.get('quantity')
+        user_id = message.from_user.id
+        
+        offer_id = save_offer(user_id, category, quantity, price)
+        
+        if offer_id:
+            price_rub = convert_usd_to_rub(price)
+            await message.answer(
+                f"✅ <b>Объявление создано!</b>\n\n"
+                f"Категория: {CATEGORIES[category]}\n"
+                f"Количество: {quantity}\n"
+                f"Цена: ${price} (≈{price_rub:.0f}р)",
+                reply_markup=get_main_menu()
+            )
+            logger.info(f"Offer created: id={offer_id}, user={user_id}")
+        else:
+            await message.answer("❌ Ошибка создания объявления!", reply_markup=get_main_menu())
+        
+        await state.clear()
+    except ValueError:
+        await message.answer("❌ Введите число!", reply_markup=get_main_menu())
+        await state.clear()
+
+@router.callback_query(F.data == "my_offers")
+async def my_offers_handler(query: CallbackQuery):
+    await query.answer()
+    user_id = query.from_user.id
+    my_offers = get_user_offers(user_id)
+    if my_offers:
+        text = "📊 <b>Мои объявления:</b>\n\n"
+        keyboard = []
+        for offer_id, category, quantity, price in my_offers:
+            price_rub = convert_usd_to_rub(price)
+            text += f"{CATEGORIES[category]} | {quantity} = ${price}\n"
+            keyboard.append([InlineKeyboardButton(text=f"❌ #{offer_id}", callback_data=f"delete_{offer_id}")])
+        keyboard.append([InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")])
+    else:
+        text = "📭 <b>У вас нет объявлений</b>"
+        keyboard = [[InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]]
+    try:
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    except TelegramBadRequest:
+        pass
+
+@router.callback_query(F.data.startswith("delete_"))
+async def delete_offer_handler(query: CallbackQuery):
+    await query.answer()
+    offer_id = int(query.data.replace("delete_", ""))
+    user_id = query.from_user.id
+    
+    if delete_offer(offer_id, user_id):
+        await query.message.edit_text("✅ Объявление удалено!", reply_markup=get_main_menu())
+    else:
+        await query.message.edit_text("❌ Ошибка удаления!", reply_markup=get_main_menu())
 
 @router.callback_query(F.data == "wallet")
 async def wallet_handler(query: CallbackQuery):
@@ -505,26 +678,14 @@ async def withdraw_amount(message: Message, state: FSMContext):
             await state.clear()
             return
         
-        logger.info(f"1️⃣ Starting withdrawal for user {user_id}: ${amount_usd}")
-        logger.info(f"2️⃣ Current balance: {balance:.0f}р (${balance_usd:.2f})")
-        
-        # ✅ ШАГИ 1-2: Проверяем баланс
-        
-        # ✅ ШАГ 3: Создаем чек СНАЧАЛА
-        logger.info(f"3️⃣ Creating check...")
+        logger.info(f"Creating check for user {user_id}: ${amount_usd}")
         success, check_url_or_error, check_id = create_check(amount_usd, user_id)
         
         if success:
-            logger.info(f"4️⃣ Check created successfully! check_id={check_id}")
-            
-            # ✅ ШАГ 5: ТОЛЬКО ТЕПЕРЬ вычитаем баланс
             amount_rub = convert_usd_to_rub(amount_usd)
             new_balance = balance - amount_rub
             
-            logger.info(f"5️⃣ Deducting balance: {balance:.0f}р - {amount_rub:.0f}р = {new_balance:.0f}р")
-            
             if update_wallet(user_id, new_balance):
-                logger.info(f"6️⃣ Balance updated successfully!")
                 add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd}')
                 save_withdrawal(user_id, amount_usd, 'success', check_id)
                 
@@ -536,23 +697,15 @@ async def withdraw_amount(message: Message, state: FSMContext):
                     f"Нажми кнопку ниже, чтобы получить деньги в @CryptoBot",
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
                 )
-                logger.info(f"7️⃣ Withdrawal completed successfully!")
             else:
-                logger.error(f"❌ Failed to update wallet!")
                 await message.answer("❌ Ошибка обновления баланса!", reply_markup=get_main_menu())
         else:
-            logger.error(f"4️⃣ Check creation failed: {check_url_or_error}")
-            logger.info(f"❌ NOT deducting balance because check creation failed!")
             await message.answer(f"❌ Ошибка!\n\n{check_url_or_error}", reply_markup=get_main_menu())
             save_withdrawal(user_id, amount_usd, 'failed', None)
         
         await state.clear()
     except ValueError:
         await message.answer("❌ Введите число!", reply_markup=get_main_menu())
-        await state.clear()
-    except Exception as e:
-        logger.error(f"Withdraw error: {e}")
-        await message.answer("❌ Ошибка!", reply_markup=get_main_menu())
         await state.clear()
 
 @router.callback_query(F.data.startswith("check_"))
@@ -603,36 +756,6 @@ async def check_payment(query: CallbackQuery):
         except TelegramBadRequest:
             pass
 
-@router.callback_query(F.data == "my_offers")
-async def my_offers_handler(query: CallbackQuery):
-    await query.answer()
-    user_id = query.from_user.id
-    my_offers = [o for o in offers_storage.values() if o['author_id'] == user_id]
-    if my_offers:
-        text = "📊 Мои предложения:\n\n"
-        for offer in my_offers:
-            price_rub = convert_usd_to_rub(offer['price'])
-            text += f"{offer['quantity']} = ${offer['price']} (≈{price_rub:.0f}р)\n"
-        keyboard = []
-        for offer in my_offers:
-            keyboard.append([InlineKeyboardButton(text=f"❌ #{offer['id']}", callback_data=f"cancel_{offer['id']}")])
-        keyboard.append([InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")])
-    else:
-        text = "📭 Нет предложений"
-        keyboard = [[InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]]
-    try:
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
-    except TelegramBadRequest:
-        pass
-
-@router.callback_query(F.data == "my_deals")
-async def my_deals_handler(query: CallbackQuery):
-    await query.answer()
-    try:
-        await query.message.edit_text("📋 Нет сделок", reply_markup=get_main_menu())
-    except TelegramBadRequest:
-        pass
-
 @router.callback_query(F.data == "profile")
 async def profile_handler(query: CallbackQuery):
     await query.answer()
@@ -673,19 +796,6 @@ async def return_main(query: CallbackQuery):
     except TelegramBadRequest:
         pass
 
-@router.callback_query(F.data.startswith("cancel_"))
-async def cancel_offer(query: CallbackQuery):
-    await query.answer()
-    offer_id = int(query.data.replace("cancel_", ""))
-    user_id = query.from_user.id
-    if offer_id in offers_storage:
-        if offers_storage[offer_id]['author_id'] == user_id:
-            del offers_storage[offer_id]
-            try:
-                await query.message.edit_text("✅ Отменено", reply_markup=get_main_menu())
-            except TelegramBadRequest:
-                pass
-
 async def on_startup(bot: Bot) -> None:
     try:
         await bot.delete_webhook()
@@ -715,7 +825,7 @@ async def main():
     logger.info("✅ Database")
     logger.info("✅ All tokens loaded from environment variables")
     logger.info("✅ Using createCheck() for withdrawals")
-    logger.info("✅ FIXED: Balance deducted ONLY after successful check creation")
+    logger.info("✅ Create offers system is active")
     while True:
         await asyncio.sleep(3600)
 
