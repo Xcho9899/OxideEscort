@@ -20,7 +20,6 @@ from aiogram.exceptions import TelegramBadRequest
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Все токены берются из environment variables
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 CRYPTOBOT_API = "https://pay.crypt.bot/api"
 CRYPTOBOT_TOKEN = os.environ.get('CRYPTO_BOT_TOKEN')
@@ -297,36 +296,35 @@ def check_invoice_paid(invoice_id: str):
         logger.error(f"Check error: {e}")
         return False
 
-def transfer_to_user(user_id: int, amount_usd: float):
+def withdraw_to_address(amount_usd: float, address: str):
     try:
-        spend_id = str(uuid4())
-        logger.info(f"Transfer to user {user_id}: ${amount_usd}, spendId={spend_id}")
+        invoice_id = str(uuid4())
+        logger.info(f"Withdraw: ${amount_usd} to {address}, invoice_id={invoice_id}")
         
         headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN, "Content-Type": "application/json"}
         payload = {
-            "user_id": user_id,
             "asset": "USDT",
             "amount": str(amount_usd),
-            "spend_id": spend_id,
-            
+            "address": address,
+            "invoice_id": invoice_id
         }
         
-        logger.info(f"Transfer payload: {payload}")
-        response = requests.post(f"{CRYPTOBOT_API}/transfer", headers=headers, json=payload, timeout=10)
+        logger.info(f"Withdraw payload: {payload}")
+        response = requests.post(f"{CRYPTOBOT_API}/withdraw", headers=headers, json=payload, timeout=10)
         
-        logger.info(f"Transfer status: {response.status_code}")
-        logger.info(f"Transfer response: {response.text}")
+        logger.info(f"Withdraw status: {response.status_code}")
+        logger.info(f"Withdraw response: {response.text}")
         
         if response.status_code == 200:
             data = response.json()
             if data.get('ok'):
-                logger.info(f"Transfer success: {data}")
+                logger.info(f"Withdraw success: {data}")
                 return True, data.get('result')
         
-        logger.error(f"Transfer failed: {response.text}")
+        logger.error(f"Withdraw failed: {response.text}")
         return False, response.text
     except Exception as e:
-        logger.error(f"Transfer error: {e}")
+        logger.error(f"Withdraw error: {e}")
         return False, str(e)
 
 def get_main_menu():
@@ -464,7 +462,7 @@ async def withdraw_amount(message: Message, state: FSMContext):
             return
         
         await state.update_data(withdraw_amount=amount_usd)
-        await message.answer("💰 Вывести на счет в Telegram\n\n(Деньги придут в @CryptoBot)")
+        await message.answer("💰 Введите TRC-20 адрес\n\n(начинается с T, 34 символа)")
         await state.set_state(WithdrawStates.address)
     except ValueError:
         await message.answer("❌ Введите число!", reply_markup=get_main_menu())
@@ -473,6 +471,12 @@ async def withdraw_amount(message: Message, state: FSMContext):
 @router.message(StateFilter(WithdrawStates.address), F.text)
 async def withdraw_address(message: Message, state: FSMContext):
     try:
+        address = message.text.strip()
+        if not (len(address) == 34 and address.startswith('T')):
+            await message.answer("❌ Неверный адрес! (T + 34 символа)", reply_markup=get_main_menu())
+            await state.clear()
+            return
+        
         user_id = message.from_user.id
         data = await state.get_data()
         amount_usd = data.get('withdraw_amount')
@@ -485,18 +489,18 @@ async def withdraw_address(message: Message, state: FSMContext):
             await state.clear()
             return
         
-        logger.info(f"Transferring ${amount_usd} to user {user_id}")
-        success, result = transfer_to_user(user_id, amount_usd)
+        logger.info(f"Withdrawing ${amount_usd} from user {user_id} to {address}")
+        success, result = withdraw_to_address(amount_usd, address)
         
         if success:
             new_balance = balance - amount_rub
             update_wallet(user_id, new_balance)
-            add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd}')
-            await message.answer(f"✅ Отправлено ${amount_usd}\n\nДеньги придут в @CryptoBot\n\nНовый баланс: {new_balance:.0f}р", reply_markup=get_main_menu())
-            logger.info(f"Transfer success: ${amount_usd}")
+            add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd} на {address[:10]}...')
+            await message.answer(f"✅ Отправлено ${amount_usd} на адрес\n\nНовый баланс: {new_balance:.0f}р", reply_markup=get_main_menu())
+            logger.info(f"Withdraw success: ${amount_usd}")
         else:
             await message.answer(f"❌ Ошибка!\n\n{result}", reply_markup=get_main_menu())
-            logger.error(f"Transfer failed: {result}")
+            logger.error(f"Withdraw failed: {result}")
         
         await state.clear()
     except Exception as e:
@@ -610,7 +614,7 @@ async def history_handler(query: CallbackQuery):
 async def help_handler(query: CallbackQuery):
     await query.answer()
     try:
-        await query.message.edit_text("❓ Маркетплейс Oxide\n\n💰 Комиссия 5%\n💵 USDT USD", reply_markup=get_main_menu())
+        await query.message.edit_text("❓ Маркетплейс Oxide\n\n💰 Комиссия 5%\n💵 USDT TRC-20", reply_markup=get_main_menu())
     except TelegramBadRequest:
         pass
 
