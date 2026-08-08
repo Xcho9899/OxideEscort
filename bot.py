@@ -308,7 +308,7 @@ def transfer_to_user(user_id: int, amount_usd: float):
             "asset": "USDT",
             "amount": str(amount_usd),
             "spend_id": spend_id,
-            "comment": "Вывод заработков из OxideEscort"
+            
         }
         
         logger.info(f"Transfer payload: {payload}")
