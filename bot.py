@@ -329,7 +329,7 @@ def create_check(amount_usd: float, user_id: int):
             data = response.json()
             if data.get('ok'):
                 check_data = data.get('result', {})
-                check_url = check_data.get('check_url')
+                check_url = check_data.get('bot_check_url')
                 logger.info(f"Check created successfully: {check_url}")
                 return True, check_url
         
@@ -482,10 +482,7 @@ async def withdraw_amount(message: Message, state: FSMContext):
             update_wallet(user_id, new_balance)
             add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd}')
             
-            keyboard = [
-                [InlineKeyboardButton(text="💳 Забрать деньги в CryptoBot", url=check_url_or_error)],
-                [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
-            ]
+            keyboard = [[InlineKeyboardButton(text="💳 Забрать деньги в CryptoBot", url=check_url_or_error)]]
             await message.answer(
                 f"✅ <b>Вывод создан!</b>\n\n"
                 f"Сумма: ${amount_usd}\n"
