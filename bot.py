@@ -102,6 +102,16 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS withdrawals (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            amount_usd DECIMAL(10, 2),
+            status VARCHAR(50),
+            check_id VARCHAR(255),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
         conn.commit()
         logger.info("✅ Database tables created")
     except Exception as e:
@@ -222,6 +232,27 @@ def add_history(user_id, type_str, amount, description):
         cursor.close()
         return_db(conn)
 
+def save_withdrawal(user_id, amount_usd, status, check_id=None):
+    conn = get_db()
+    if not conn:
+        return False
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        INSERT INTO withdrawals (user_id, amount_usd, status, check_id)
+        VALUES (%s, %s, %s, %s)
+        ''', (user_id, amount_usd, status, check_id))
+        conn.commit()
+        logger.info(f"✅ Withdrawal saved: user={user_id}, amount=${amount_usd}, status={status}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Withdrawal save error: {e}")
+        conn.rollback()
+        return False
+    finally:
+        cursor.close()
+        return_db(conn)
+
 def get_history(user_id, limit=10):
     conn = get_db()
     if not conn:
@@ -330,14 +361,15 @@ def create_check(amount_usd: float, user_id: int):
             if data.get('ok'):
                 check_data = data.get('result', {})
                 check_url = check_data.get('bot_check_url')
+                check_id = check_data.get('check_id')
                 logger.info(f"Check created successfully: {check_url}")
-                return True, check_url
+                return True, check_url, check_id
         
         logger.error(f"Check creation failed: {response.text}")
-        return False, response.text
+        return False, response.text, None
     except Exception as e:
         logger.error(f"Check error: {e}")
-        return False, str(e)
+        return False, str(e), None
 
 def get_main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -473,27 +505,46 @@ async def withdraw_amount(message: Message, state: FSMContext):
             await state.clear()
             return
         
-        logger.info(f"Creating check for user {user_id}: ${amount_usd}")
-        success, check_url_or_error = create_check(amount_usd, user_id)
+        logger.info(f"1️⃣ Starting withdrawal for user {user_id}: ${amount_usd}")
+        logger.info(f"2️⃣ Current balance: {balance:.0f}р (${balance_usd:.2f})")
+        
+        # ✅ ШАГИ 1-2: Проверяем баланс
+        
+        # ✅ ШАГ 3: Создаем чек СНАЧАЛА
+        logger.info(f"3️⃣ Creating check...")
+        success, check_url_or_error, check_id = create_check(amount_usd, user_id)
         
         if success:
+            logger.info(f"4️⃣ Check created successfully! check_id={check_id}")
+            
+            # ✅ ШАГ 5: ТОЛЬКО ТЕПЕРЬ вычитаем баланс
             amount_rub = convert_usd_to_rub(amount_usd)
             new_balance = balance - amount_rub
-            update_wallet(user_id, new_balance)
-            add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd}')
             
-            keyboard = [[InlineKeyboardButton(text="💳 Забрать деньги в CryptoBot", url=check_url_or_error)]]
-            await message.answer(
-                f"✅ <b>Вывод создан!</b>\n\n"
-                f"Сумма: ${amount_usd}\n"
-                f"Новый баланс: {new_balance:.0f}р\n\n"
-                f"Нажми кнопку ниже, чтобы получить деньги в @CryptoBot",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-            )
-            logger.info(f"Check created successfully for user {user_id}")
+            logger.info(f"5️⃣ Deducting balance: {balance:.0f}р - {amount_rub:.0f}р = {new_balance:.0f}р")
+            
+            if update_wallet(user_id, new_balance):
+                logger.info(f"6️⃣ Balance updated successfully!")
+                add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd}')
+                save_withdrawal(user_id, amount_usd, 'success', check_id)
+                
+                keyboard = [[InlineKeyboardButton(text="💳 Забрать деньги в CryptoBot", url=check_url_or_error)]]
+                await message.answer(
+                    f"✅ <b>Вывод создан!</b>\n\n"
+                    f"Сумма: ${amount_usd}\n"
+                    f"Новый баланс: {new_balance:.0f}р\n\n"
+                    f"Нажми кнопку ниже, чтобы получить деньги в @CryptoBot",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+                )
+                logger.info(f"7️⃣ Withdrawal completed successfully!")
+            else:
+                logger.error(f"❌ Failed to update wallet!")
+                await message.answer("❌ Ошибка обновления баланса!", reply_markup=get_main_menu())
         else:
+            logger.error(f"4️⃣ Check creation failed: {check_url_or_error}")
+            logger.info(f"❌ NOT deducting balance because check creation failed!")
             await message.answer(f"❌ Ошибка!\n\n{check_url_or_error}", reply_markup=get_main_menu())
-            logger.error(f"Check creation failed: {check_url_or_error}")
+            save_withdrawal(user_id, amount_usd, 'failed', None)
         
         await state.clear()
     except ValueError:
@@ -664,6 +715,7 @@ async def main():
     logger.info("✅ Database")
     logger.info("✅ All tokens loaded from environment variables")
     logger.info("✅ Using createCheck() for withdrawals")
+    logger.info("✅ FIXED: Balance deducted ONLY after successful check creation")
     while True:
         await asyncio.sleep(3600)
 
