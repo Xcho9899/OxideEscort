@@ -6,7 +6,7 @@ import psycopg2
 from psycopg2 import pool
 from datetime import datetime
 from uuid import uuid4
-from aiohttp import web
+from aiohttp import web, ClientSession
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -239,6 +239,18 @@ def get_history(user_id, limit=10):
     finally:
         cursor.close()
         return_db(conn)
+
+async def get_server_ip():
+    try:
+        async with ClientSession() as session:
+            async with session.get('https://api.ipify.org?format=json', timeout=5) as resp:
+                data = await resp.json()
+                server_ip = data.get('ip')
+                logger.info(f"🌍 SERVER OUTGOING IP: {server_ip}")
+                return server_ip
+    except Exception as e:
+        logger.error(f"❌ Cannot get server IP: {e}")
+        return None
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -650,6 +662,12 @@ async def on_startup(bot: Bot) -> None:
 
 async def main():
     init_db()
+    
+    # Получить реальный IP сервера
+    server_ip = await get_server_ip()
+    if server_ip:
+        logger.info(f"📋 ADD THIS IP TO CRYPTOBOT WHITELIST: {server_ip}")
+    
     dp.startup.register(on_startup)
     app = web.Application()
     webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
