@@ -120,6 +120,17 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS deals (
+            id SERIAL PRIMARY KEY,
+            offer_id INT,
+            buyer_id BIGINT,
+            seller_id BIGINT,
+            amount DECIMAL(10, 2),
+            status VARCHAR(50) DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
         conn.commit()
         logger.info("✅ Database tables created")
     except Exception as e:
@@ -278,6 +289,24 @@ def save_withdrawal(user_id, amount_usd, status, check_id=None):
         cursor.close()
         return_db(conn)
 
+def check_duplicate_offer(user_id, category, price):
+    conn = get_db()
+    if not conn:
+        return False
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        SELECT id FROM offers 
+        WHERE user_id = %s AND category = %s AND price = %s AND status = %s
+        ''', (user_id, category, price, 'active'))
+        result = cursor.fetchone()
+        return result is not None
+    except:
+        return False
+    finally:
+        cursor.close()
+        return_db(conn)
+
 def save_offer(user_id, category, quantity, price):
     conn = get_db()
     if not conn:
@@ -319,6 +348,23 @@ def get_offers_by_category(category):
         cursor.close()
         return_db(conn)
 
+def get_offer_by_id(offer_id):
+    conn = get_db()
+    if not conn:
+        return None
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        SELECT id, user_id, category, quantity, price::double precision FROM offers 
+        WHERE id = %s AND status = %s
+        ''', (offer_id, 'active'))
+        return cursor.fetchone()
+    except:
+        return None
+    finally:
+        cursor.close()
+        return_db(conn)
+
 def get_user_offers(user_id):
     conn = get_db()
     if not conn:
@@ -351,6 +397,29 @@ def delete_offer(offer_id, user_id):
         logger.error(f"❌ Delete error: {e}")
         conn.rollback()
         return False
+    finally:
+        cursor.close()
+        return_db(conn)
+
+def save_deal(offer_id, buyer_id, seller_id, amount):
+    conn = get_db()
+    if not conn:
+        return None
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        INSERT INTO deals (offer_id, buyer_id, seller_id, amount, status)
+        VALUES (%s, %s, %s, %s, %s)
+        RETURNING id
+        ''', (offer_id, buyer_id, seller_id, amount, 'pending'))
+        deal_id = cursor.fetchone()[0]
+        conn.commit()
+        logger.info(f"✅ Deal created: id={deal_id}, buyer={buyer_id}, seller={seller_id}")
+        return deal_id
+    except Exception as e:
+        logger.error(f"❌ Deal save error: {e}")
+        conn.rollback()
+        return None
     finally:
         cursor.close()
         return_db(conn)
@@ -506,6 +575,121 @@ async def category_handler(query: CallbackQuery):
         except TelegramBadRequest:
             pass
 
+@router.callback_query(F.data.startswith("view_"))
+async def view_offer_handler(query: CallbackQuery):
+    await query.answer()
+    offer_id = int(query.data.replace("view_", ""))
+    buyer_id = query.from_user.id
+    
+    offer = get_offer_by_id(offer_id)
+    if not offer:
+        try:
+            await query.message.edit_text("❌ Объявление не найдено!", reply_markup=get_main_menu())
+        except TelegramBadRequest:
+            pass
+        return
+    
+    offer_id_db, seller_id, category, quantity, price = offer
+    
+    # ❌ Нельзя принять свое объявление
+    if buyer_id == seller_id:
+        try:
+            await query.message.edit_text("❌ Это ваше объявление!", reply_markup=get_main_menu())
+        except TelegramBadRequest:
+            pass
+        return
+    
+    price_rub = convert_usd_to_rub(price)
+    text = f"📋 <b>Деталь объявления</b>\n\n" \
+            f"Категория: {CATEGORIES[category]}\n" \
+            f"Количество: {quantity}\n" \
+            f"Цена: ${price} (≈{price_rub:.0f}р)\n" \
+            f"Продавец: @user{seller_id}"
+    
+    keyboard = [
+        [InlineKeyboardButton(text="✅ Принять задание", callback_data=f"accept_{offer_id_db}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="board")]
+    ]
+    
+    try:
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    except TelegramBadRequest:
+        pass
+
+@router.callback_query(F.data.startswith("accept_"))
+async def accept_offer_handler(query: CallbackQuery):
+    await query.answer()
+    offer_id = int(query.data.replace("accept_", ""))
+    buyer_id = query.from_user.id
+    
+    offer = get_offer_by_id(offer_id)
+    if not offer:
+        try:
+            await query.message.edit_text("❌ Объявление не найдено!", reply_markup=get_main_menu())
+        except TelegramBadRequest:
+            pass
+        return
+    
+    offer_id_db, seller_id, category, quantity, price = offer
+    rate = get_usdt_rub_rate()
+    buyer_balance = get_wallet(buyer_id)
+    buyer_balance_usd = buyer_balance / rate if rate else 0
+    
+    # ✅ Проверка баланса покупателя
+    if buyer_balance_usd < price:
+        try:
+            await query.message.edit_text(
+                f"❌ Недостаточно средств!\n\n"
+                f"Нужно: ${price}\n"
+                f"Баланс: ${buyer_balance_usd:.2f}",
+                reply_markup=get_main_menu()
+            )
+        except TelegramBadRequest:
+            pass
+        return
+    
+    # ✅ Создание сделки
+    deal_id = save_deal(offer_id_db, buyer_id, seller_id, price)
+    
+    if deal_id:
+        # ✅ Вычитаем деньги у покупателя
+        new_buyer_balance = buyer_balance - (price * rate)
+        update_wallet(buyer_id, new_buyer_balance)
+        add_history(buyer_id, 'deal', price * rate, f'Задание #{deal_id} - {quantity}')
+        
+        # ✅ Добавляем деньги продавцу (минус комиссия 5%)
+        commission = price * 0.05
+        seller_amount = price - commission
+        seller_amount_rub = seller_amount * rate
+        seller_balance = get_wallet(seller_id)
+        new_seller_balance = seller_balance + seller_amount_rub
+        update_wallet(seller_id, new_seller_balance)
+        add_history(seller_id, 'deal', seller_amount_rub, f'Задание #{deal_id} - {quantity} (комиссия: ${commission})')
+        
+        price_rub = convert_usd_to_rub(price)
+        seller_rub = convert_usd_to_rub(seller_amount)
+        commission_rub = convert_usd_to_rub(commission)
+        
+        try:
+            await query.message.edit_text(
+                f"✅ <b>Задание принято!</b>\n\n"
+                f"Сделка: #{deal_id}\n"
+                f"Стоимость: ${price} (≈{price_rub:.0f}р)\n"
+                f"Ваши затраты: ${price}\n"
+                f"Новый баланс: {new_buyer_balance:.0f}р\n\n"
+                f"Продавец получит: ${seller_amount} (комиссия: ${commission})",
+                reply_markup=get_main_menu()
+            )
+        except TelegramBadRequest:
+            pass
+        
+        logger.info(f"Deal created: id={deal_id}, buyer={buyer_id}, seller={seller_id}, amount=${price}")
+    else:
+        try:
+            await query.message.edit_text("❌ Ошибка создания сделки!", reply_markup=get_main_menu())
+        except TelegramBadRequest:
+            pass
+
 @router.callback_query(F.data == "create_offer")
 async def create_offer_start(query: CallbackQuery, state: FSMContext):
     await query.answer()
@@ -523,14 +707,20 @@ async def create_offer_category(query: CallbackQuery, state: FSMContext):
     await query.answer()
     category = query.data.replace("offer_cat_", "")
     await state.update_data(category=category)
-    await query.message.answer("📝 <b>Введите количество</b>\n\nНапример: 100, 50, 1000")
+    await query.message.answer("📝 <b>Введите количество (только цифры)</b>\n\nНапример: 100, 50, 1000")
     await state.set_state(CreateOfferStates.quantity)
 
 @router.message(StateFilter(CreateOfferStates.quantity), F.text)
 async def create_offer_quantity(message: Message, state: FSMContext):
-    quantity = message.text.strip()
+    quantity_text = message.text.strip()
+    
+    if not quantity_text.isdigit():
+        await message.answer("❌ Введите только цифры! Например: 100, 50, 1000")
+        return
+    
+    quantity = quantity_text
     await state.update_data(quantity=quantity)
-    await message.answer("💰 <b>Введите цену в USD</b>\n\nНапример: 10, 50, 100")
+    await message.answer("💰 <b>Введите цену в USD (только цифры или точка)</b>\n\nНапример: 10, 50, 100.5")
     await state.set_state(CreateOfferStates.price)
 
 @router.message(StateFilter(CreateOfferStates.price), F.text)
@@ -541,6 +731,17 @@ async def create_offer_price(message: Message, state: FSMContext):
         category = data.get('category')
         quantity = data.get('quantity')
         user_id = message.from_user.id
+        
+        # ✅ ПРОВЕРКА НА ДУБЛИКАТЫ
+        if check_duplicate_offer(user_id, category, price):
+            await message.answer(
+                f"❌ У вас уже есть такое объявление!\n\n"
+                f"Категория: {CATEGORIES[category]}\n"
+                f"Цена: ${price}",
+                reply_markup=get_main_menu()
+            )
+            await state.clear()
+            return
         
         offer_id = save_offer(user_id, category, quantity, price)
         
@@ -559,7 +760,7 @@ async def create_offer_price(message: Message, state: FSMContext):
         
         await state.clear()
     except ValueError:
-        await message.answer("❌ Введите число!", reply_markup=get_main_menu())
+        await message.answer("❌ Введите число! Например: 10, 50, 100.5", reply_markup=get_main_menu())
         await state.clear()
 
 @router.callback_query(F.data == "my_offers")
@@ -824,8 +1025,8 @@ async def main():
     logger.info("✅ PostgreSQL")
     logger.info("✅ Database")
     logger.info("✅ All tokens loaded from environment variables")
-    logger.info("✅ Using createCheck() for withdrawals")
-    logger.info("✅ Create offers system is active")
+    logger.info("✅ Accept offers system is active")
+    logger.info("✅ Duplicate offers check is active")
     while True:
         await asyncio.sleep(3600)
 
