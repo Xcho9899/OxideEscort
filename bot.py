@@ -307,35 +307,36 @@ def check_invoice_paid(invoice_id: str):
         logger.error(f"Check error: {e}")
         return False
 
-def transfer_to_user(user_id: int, amount_usd: float):
+def create_check(amount_usd: float, user_id: int):
     try:
-        spend_id = str(uuid4())
-        logger.info(f"Transfer to user {user_id}: ${amount_usd}, spendId={spend_id}")
+        logger.info(f"Creating check: ${amount_usd} for user {user_id}")
         
         headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN, "Content-Type": "application/json"}
         payload = {
-            "user_id": user_id,
             "asset": "USDT",
             "amount": str(amount_usd),
-            "spendId": spend_id
+            "user_id": user_id,
+            "description": "Вывод заработков из OxideEscort"
         }
         
-        logger.info(f"Transfer payload: {payload}")
-        response = requests.post(f"{CRYPTOBOT_API}/transfer", headers=headers, json=payload, timeout=10)
+        logger.info(f"Check payload: {payload}")
+        response = requests.post(f"{CRYPTOBOT_API}/createCheck", headers=headers, json=payload, timeout=10)
         
-        logger.info(f"Transfer status: {response.status_code}")
-        logger.info(f"Transfer response: {response.text}")
+        logger.info(f"Check status: {response.status_code}")
+        logger.info(f"Check response: {response.text}")
         
         if response.status_code == 200:
             data = response.json()
             if data.get('ok'):
-                logger.info(f"Transfer success: {data}")
-                return True, data.get('result')
+                check_data = data.get('result', {})
+                check_url = check_data.get('check_url')
+                logger.info(f"Check created successfully: {check_url}")
+                return True, check_url
         
-        logger.error(f"Transfer failed: {response.text}")
+        logger.error(f"Check creation failed: {response.text}")
         return False, response.text
     except Exception as e:
-        logger.error(f"Transfer error: {e}")
+        logger.error(f"Check error: {e}")
         return False, str(e)
 
 def get_main_menu():
@@ -472,19 +473,30 @@ async def withdraw_amount(message: Message, state: FSMContext):
             await state.clear()
             return
         
-        logger.info(f"Withdrawing ${amount_usd} from user {user_id}")
-        success, result = transfer_to_user(user_id, amount_usd)
+        logger.info(f"Creating check for user {user_id}: ${amount_usd}")
+        success, check_url_or_error = create_check(amount_usd, user_id)
         
         if success:
             amount_rub = convert_usd_to_rub(amount_usd)
             new_balance = balance - amount_rub
             update_wallet(user_id, new_balance)
             add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd}')
-            await message.answer(f"✅ Отправлено ${amount_usd}\n\nДеньги пришли в @CryptoBot\n\nНовый баланс: {new_balance:.0f}р", reply_markup=get_main_menu())
-            logger.info(f"Withdraw success: ${amount_usd}")
+            
+            keyboard = [
+                [InlineKeyboardButton(text="💳 Забрать деньги в CryptoBot", url=check_url_or_error)],
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+            ]
+            await message.answer(
+                f"✅ <b>Вывод создан!</b>\n\n"
+                f"Сумма: ${amount_usd}\n"
+                f"Новый баланс: {new_balance:.0f}р\n\n"
+                f"Нажми кнопку ниже, чтобы получить деньги в @CryptoBot",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+            )
+            logger.info(f"Check created successfully for user {user_id}")
         else:
-            await message.answer(f"❌ Ошибка!\n\n{result}", reply_markup=get_main_menu())
-            logger.error(f"Withdraw failed: {result}")
+            await message.answer(f"❌ Ошибка!\n\n{check_url_or_error}", reply_markup=get_main_menu())
+            logger.error(f"Check creation failed: {check_url_or_error}")
         
         await state.clear()
     except ValueError:
@@ -654,7 +666,7 @@ async def main():
     logger.info("✅ PostgreSQL")
     logger.info("✅ Database")
     logger.info("✅ All tokens loaded from environment variables")
-    logger.info("✅ transfer() enabled in CryptoBot")
+    logger.info("✅ Using createCheck() for withdrawals")
     while True:
         await asyncio.sleep(3600)
 
