@@ -24,6 +24,7 @@ BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 CRYPTOBOT_API = "https://pay.crypt.bot/api"
 CRYPTOBOT_TOKEN = os.environ.get('CRYPTO_BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
+MODERATOR_ID = 8563207482  # ← ТВОЙ ID!
 
 WEBHOOK_URL = "/webhook/telegram"
 WEBHOOK_HOST = "oxideescort-3.onrender.com"
@@ -41,6 +42,13 @@ class CreateOfferStates(StatesGroup):
     category = State()
     quantity = State()
     price = State()
+
+class MessageStates(StatesGroup):
+    text = State()
+
+class BanStates(StatesGroup):
+    nickname = State()
+    reason = State()
 
 CATEGORIES = {
     "farm_sulfur": "⚒️ Фарм серы",
@@ -90,6 +98,15 @@ def init_db():
         )
         ''')
         cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_profile (
+            user_id BIGINT PRIMARY KEY,
+            username VARCHAR(255),
+            nickname VARCHAR(255),
+            rating DECIMAL(3, 2) DEFAULT 5.0,
+            completed_deals INT DEFAULT 0
+        )
+        ''')
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_history (
             id SERIAL PRIMARY KEY,
             user_id BIGINT,
@@ -121,9 +138,6 @@ def init_db():
         )
         ''')
         cursor.execute('''
-        DROP TABLE IF EXISTS deals
-        ''')
-        cursor.execute('''
         CREATE TABLE IF NOT EXISTS deals (
             id SERIAL PRIMARY KEY,
             offer_id INT,
@@ -136,11 +150,63 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id SERIAL PRIMARY KEY,
+            deal_id INT,
+            sender_id BIGINT,
+            text VARCHAR(500),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS banned_players (
+            id SERIAL PRIMARY KEY,
+            nickname VARCHAR(255) UNIQUE,
+            reason VARCHAR(500),
+            banned_by BIGINT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
         conn.commit()
         logger.info("✅ Database tables created")
     except Exception as e:
         logger.error(f"❌ Init error: {e}")
         conn.rollback()
+    finally:
+        cursor.close()
+        return_db(conn)
+
+def get_or_create_profile(user_id, username):
+    conn = get_db()
+    if not conn:
+        return False
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        INSERT INTO user_profile (user_id, username) VALUES (%s, %s)
+        ON CONFLICT (user_id) DO NOTHING
+        ''', (user_id, username))
+        conn.commit()
+        return True
+    except:
+        return False
+    finally:
+        cursor.close()
+        return_db(conn)
+
+def get_profile(user_id):
+    conn = get_db()
+    if not conn:
+        return None
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        SELECT user_id, username, nickname, rating, completed_deals FROM user_profile WHERE user_id = %s
+        ''', (user_id,))
+        return cursor.fetchone()
+    except:
+        return None
     finally:
         cursor.close()
         return_db(conn)
@@ -295,7 +361,6 @@ def save_withdrawal(user_id, amount_usd, status, check_id=None):
         return_db(conn)
 
 def check_duplicate_offer(user_id, category):
-    """✅ НОВОЕ: Проверка - есть ли уже объявление ЭТОЙ КАТЕГОРИИ"""
     conn = get_db()
     if not conn:
         return False
@@ -447,6 +512,24 @@ def get_deal(deal_id):
         cursor.close()
         return_db(conn)
 
+def get_user_deals(user_id):
+    conn = get_db()
+    if not conn:
+        return []
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        SELECT id, seller_id, buyer_id, amount_usd::double precision, status FROM deals 
+        WHERE (seller_id = %s OR buyer_id = %s) AND status = %s
+        ORDER BY created_at DESC
+        ''', (user_id, user_id, 'pending'))
+        return cursor.fetchall()
+    except:
+        return []
+    finally:
+        cursor.close()
+        return_db(conn)
+
 def update_deal_confirmation(deal_id, role, confirmed):
     conn = get_db()
     if not conn:
@@ -475,22 +558,20 @@ def complete_deal(deal_id):
     cursor = conn.cursor()
     try:
         cursor.execute('''
-        SELECT seller_id, buyer_id, amount_usd::double precision FROM deals WHERE id = %s
+        SELECT seller_id, buyer_id, amount_usd::double precision, offer_id FROM deals WHERE id = %s
         ''', (deal_id,))
         result = cursor.fetchone()
         if not result:
             return False
         
-        seller_id, buyer_id, amount_usd = result
+        seller_id, buyer_id, amount_usd, offer_id = result
         rate = get_usdt_rub_rate()
         
-        # Вычитаем у продавца
         seller_balance = get_wallet(seller_id)
         amount_rub = convert_usd_to_rub(amount_usd)
         new_seller_balance = seller_balance - amount_rub
         update_wallet(seller_id, new_seller_balance)
         
-        # Даем покупателю (минус комиссия 5%)
         commission = amount_usd * 0.05
         buyer_amount = amount_usd - commission
         buyer_amount_rub = convert_usd_to_rub(buyer_amount)
@@ -498,18 +579,87 @@ def complete_deal(deal_id):
         new_buyer_balance = buyer_balance + buyer_amount_rub
         update_wallet(buyer_id, new_buyer_balance)
         
-        # Обновляем статус
         cursor.execute("UPDATE deals SET status = %s WHERE id = %s", ('completed', deal_id))
+        cursor.execute("DELETE FROM offers WHERE id = %s", (offer_id,))
         conn.commit()
         
         add_history(seller_id, 'deal_payment', amount_rub, f'Оплата за задание #{deal_id}')
-        add_history(buyer_id, 'deal_complete', buyer_amount_rub, f'Получено за задание #{deal_id} (комиссия: ${commission})')
+        add_history(buyer_id, 'deal_complete', buyer_amount_rub, f'Получено за задание #{deal_id}')
         
         logger.info(f"✅ Deal completed: id={deal_id}, seller_paid=${amount_usd}, buyer_got=${buyer_amount}")
         return True
     except Exception as e:
         logger.error(f"❌ Complete deal error: {e}")
         conn.rollback()
+        return False
+    finally:
+        cursor.close()
+        return_db(conn)
+
+def save_message(deal_id, sender_id, text):
+    conn = get_db()
+    if not conn:
+        return False
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        INSERT INTO messages (deal_id, sender_id, text)
+        VALUES (%s, %s, %s)
+        ''', (deal_id, sender_id, text))
+        conn.commit()
+        return True
+    except:
+        return False
+    finally:
+        cursor.close()
+        return_db(conn)
+
+def get_messages(deal_id):
+    conn = get_db()
+    if not conn:
+        return []
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        SELECT sender_id, text, created_at FROM messages 
+        WHERE deal_id = %s ORDER BY created_at ASC
+        ''', (deal_id,))
+        return cursor.fetchall()
+    except:
+        return []
+    finally:
+        cursor.close()
+        return_db(conn)
+
+def ban_player(nickname, reason, banned_by):
+    conn = get_db()
+    if not conn:
+        return False
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        INSERT INTO banned_players (nickname, reason, banned_by)
+        VALUES (%s, %s, %s)
+        ''', (nickname, reason, banned_by))
+        conn.commit()
+        logger.info(f"✅ Player banned: {nickname}")
+        return True
+    except:
+        return False
+    finally:
+        cursor.close()
+        return_db(conn)
+
+def is_player_banned(nickname):
+    conn = get_db()
+    if not conn:
+        return False
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id FROM banned_players WHERE nickname = %s", (nickname,))
+        result = cursor.fetchone()
+        return result is not None
+    except:
         return False
     finally:
         cursor.close()
@@ -622,7 +772,7 @@ def get_main_menu():
         [InlineKeyboardButton(text="📝 Создать объявление", callback_data="create_offer")],
         [InlineKeyboardButton(text="📊 Мои объявления", callback_data="my_offers")],
         [InlineKeyboardButton(text="🤝 Мои сделки", callback_data="my_deals")],
-        [InlineKeyboardButton(text="👤 Мой профиль", callback_data="profile")],
+        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
         [InlineKeyboardButton(text="💳 Кошелек", callback_data="wallet")],
         [InlineKeyboardButton(text="📜 История", callback_data="history")],
         [InlineKeyboardButton(text="❓ Помощь", callback_data="help")],
@@ -631,6 +781,9 @@ def get_main_menu():
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext):
     await state.clear()
+    user_id = message.from_user.id
+    username = message.from_user.username or f"user{user_id}"
+    get_or_create_profile(user_id, username)
     await message.answer("👋 <b>OxideEscort - Маркетплейс услуг</b>\n\n🎮 Oxide Survival Island\n💵 USDT USD\n💰 Комиссия 5%", reply_markup=get_main_menu())
 
 @router.callback_query(F.data == "board")
@@ -694,8 +847,7 @@ async def view_offer_handler(query: CallbackQuery):
     text = f"📋 <b>Детали объявления</b>\n\n" \
             f"Категория: {CATEGORIES[category]}\n" \
             f"Количество: {quantity}\n" \
-            f"Цена: ${price} (≈{price_rub:.0f}р)\n" \
-            f"Продавец: @user{seller_id}"
+            f"Цена: ${price} (≈{price_rub:.0f}р)"
     
     keyboard = [
         [InlineKeyboardButton(text="✅ Принять задание", callback_data=f"accept_{offer_id_db}")],
@@ -723,20 +875,45 @@ async def accept_offer_handler(query: CallbackQuery):
     
     offer_id_db, seller_id, category, quantity, price = offer
     
-    # ✅ Создаем сделку БЕЗ вычета денег
+    # ✅ Создаем сделку
     deal_id = save_deal(offer_id_db, seller_id, buyer_id, price)
     
     if deal_id:
+        # ❌ УДАЛЯЕМ ОБЪЯВЛЕНИЕ (больше никто не может его принять)
+        delete_offer(offer_id_db, seller_id)
+        
         price_rub = convert_usd_to_rub(price)
+        
+        # ✅ ОТПРАВЛЯЕМ УВЕДОМЛЕНИЕ ПРОДАВЦУ
+        try:
+            await bot.send_message(
+                seller_id,
+                f"🔔 <b>НОВОЕ ЗАДАНИЕ ПРИНЯТО!</b>\n\n"
+                f"Сделка: #{deal_id}\n"
+                f"Исполнитель: @{query.from_user.username or f'user{buyer_id}'}\n"
+                f"Категория: {CATEGORIES[category]}\n"
+                f"Количество: {quantity}\n"
+                f"Сумма: ${price} (≈{price_rub:.0f}р)\n\n"
+                f"Он начнет выполнять задание. Дождитесь доказательства в чате!",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💬 Написать исполнителю", callback_data=f"msg_{deal_id}")],
+                    [InlineKeyboardButton(text="👤 Профиль исполнителя", callback_data=f"profile_{buyer_id}")]
+                ])
+            )
+        except:
+            pass
+        
+        # ✅ ОТПРАВЛЯЕМ ПОДТВЕРЖДЕНИЕ ПОКУПАТЕЛЮ
         try:
             await query.message.edit_text(
                 f"✅ <b>Задание принято!</b>\n\n"
                 f"Сделка: #{deal_id}\n"
                 f"Сумма: ${price} (≈{price_rub:.0f}р)\n\n"
-                f"⏳ Ожидание выполнения...\n"
-                f"После выполнения нажмите 'Готово'",
+                f"⏳ Начните выполнение\n"
+                f"Докажите результат продавцу!",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="✅ Готово", callback_data=f"deal_done_{deal_id}")],
+                    [InlineKeyboardButton(text="💬 Написать продавцу", callback_data=f"msg_{deal_id}")],
+                    [InlineKeyboardButton(text="👤 Профиль продавца", callback_data=f"profile_{seller_id}")],
                     [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
                 ])
             )
@@ -748,10 +925,151 @@ async def accept_offer_handler(query: CallbackQuery):
         except TelegramBadRequest:
             pass
 
-@router.callback_query(F.data.startswith("deal_done_"))
-async def deal_done_handler(query: CallbackQuery):
+@router.callback_query(F.data.startswith("msg_"))
+async def message_handler(query: CallbackQuery, state: FSMContext):
     await query.answer()
-    deal_id = int(query.data.replace("deal_done_", ""))
+    deal_id = int(query.data.replace("msg_", ""))
+    await state.update_data(deal_id=deal_id)
+    await query.message.answer("💬 <b>Напишите сообщение:</b>")
+    await state.set_state(MessageStates.text)
+
+@router.message(StateFilter(MessageStates.text))
+async def save_message_handler(message: Message, state: FSMContext):
+    data = await state.get_data()
+    deal_id = data.get('deal_id')
+    sender_id = message.from_user.id
+    text = message.text
+    
+    deal = get_deal(deal_id)
+    if deal:
+        deal_id_db, offer_id, seller_id, buyer_id, amount_usd, status, seller_confirmed, buyer_confirmed = deal
+        
+        # Определяем кому отправлять
+        receiver_id = buyer_id if sender_id == seller_id else seller_id
+        
+        save_message(deal_id, sender_id, text)
+        
+        try:
+            sender_name = message.from_user.username or f"user{sender_id}"
+            await bot.send_message(
+                receiver_id,
+                f"💬 <b>Новое сообщение в сделке #{deal_id}</b>\n\n"
+                f"От: @{sender_name}\n"
+                f"Сообщение: {text}"
+            )
+        except:
+            pass
+        
+        await message.answer("✅ Сообщение отправлено!", reply_markup=get_main_menu())
+    
+    await state.clear()
+
+@router.callback_query(F.data.startswith("profile_"))
+async def view_profile_handler(query: CallbackQuery):
+    await query.answer()
+    user_id = int(query.data.replace("profile_", ""))
+    profile = get_profile(user_id)
+    
+    if profile:
+        user_id_db, username, nickname, rating, completed_deals = profile
+        text = f"👤 <b>Профиль</b>\n\n" \
+                f"Пользователь: @{username}\n" \
+                f"Ник в игре: {nickname or 'Не установлен'}\n" \
+                f"⭐ Рейтинг: {rating}/5.0\n" \
+                f"✅ Завершено сделок: {completed_deals}"
+        
+        keyboard = [[InlineKeyboardButton(text="⬅️ Назад", callback_data="return_main")]]
+    else:
+        text = "👤 Профиль не найден"
+        keyboard = [[InlineKeyboardButton(text="⬅️ Назад", callback_data="return_main")]]
+    
+    try:
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    except TelegramBadRequest:
+        pass
+
+@router.callback_query(F.data == "my_deals")
+async def my_deals_handler(query: CallbackQuery):
+    await query.answer()
+    user_id = query.from_user.id
+    deals = get_user_deals(user_id)
+    
+    if deals:
+        text = "🤝 <b>Мои активные сделки:</b>\n\n"
+        keyboard = []
+        for deal_id, seller_id, buyer_id, amount_usd, status in deals:
+            role = "Продавец" if seller_id == user_id else "Исполнитель"
+            amount_rub = convert_usd_to_rub(amount_usd)
+            text += f"#{deal_id} | {role} | ${amount_usd}\n"
+            keyboard.append([InlineKeyboardButton(text=f"Сделка #{deal_id}", callback_data=f"view_deal_{deal_id}")])
+        keyboard.append([InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")])
+    else:
+        text = "📭 <b>У вас нет активных сделок</b>"
+        keyboard = [[InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]]
+    
+    try:
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    except TelegramBadRequest:
+        pass
+
+@router.callback_query(F.data.startswith("view_deal_"))
+async def view_deal_handler(query: CallbackQuery):
+    await query.answer()
+    deal_id = int(query.data.replace("view_deal_", ""))
+    user_id = query.from_user.id
+    
+    deal = get_deal(deal_id)
+    if not deal:
+        try:
+            await query.message.edit_text("❌ Сделка не найдена!", reply_markup=get_main_menu())
+        except TelegramBadRequest:
+            pass
+        return
+    
+    deal_id_db, offer_id, seller_id, buyer_id, amount_usd, status, seller_confirmed, buyer_confirmed = deal
+    
+    is_seller = user_id == seller_id
+    amount_rub = convert_usd_to_rub(amount_usd)
+    
+    text = f"📋 <b>Сделка #{deal_id}</b>\n\n" \
+            f"Сумма: ${amount_usd} (≈{amount_rub:.0f}р)\n" \
+            f"Статус: {status}\n" \
+            f"Ваша роль: {'Продавец' if is_seller else 'Исполнитель'}\n\n"
+    
+    if is_seller:
+        if not seller_confirmed:
+            text += "⏳ Ожидание подтверждения исполнителя..."
+        else:
+            text += "✅ Вы подтвердили выполнение\n"
+        
+        keyboard = [
+            [InlineKeyboardButton(text="💬 Чат", callback_data=f"msg_{deal_id}")],
+            [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+        ]
+    else:
+        if not buyer_confirmed:
+            text += "⏳ Подтвердите что вы выполнили!"
+            keyboard = [
+                [InlineKeyboardButton(text="✅ Я выполнил!", callback_data=f"confirm_deal_{deal_id}")],
+                [InlineKeyboardButton(text="💬 Чат", callback_data=f"msg_{deal_id}")],
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+            ]
+        else:
+            text += "✅ Вы подтвердили выполнение\nОжидание проверки продавца..."
+            keyboard = [
+                [InlineKeyboardButton(text="💬 Чат", callback_data=f"msg_{deal_id}")],
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+            ]
+    
+    try:
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    except TelegramBadRequest:
+        pass
+
+@router.callback_query(F.data.startswith("confirm_deal_"))
+async def confirm_deal_handler(query: CallbackQuery):
+    await query.answer()
+    deal_id = int(query.data.replace("confirm_deal_", ""))
     buyer_id = query.from_user.id
     
     deal = get_deal(deal_id)
@@ -766,27 +1084,45 @@ async def deal_done_handler(query: CallbackQuery):
     
     if buyer_id != buyer_id_db:
         try:
-            await query.message.edit_text("❌ Вы не покупатель в этой сделке!", reply_markup=get_main_menu())
+            await query.message.edit_text("❌ Вы не исполнитель!", reply_markup=get_main_menu())
         except TelegramBadRequest:
             pass
         return
     
-    # Обновляем подтверждение покупателя
+    # Подтверждаем исполнителя
     update_deal_confirmation(deal_id, 'buyer', True)
+    
+    # Отправляем продавцу уведомление
+    try:
+        await bot.send_message(
+            seller_id,
+            f"🔔 <b>ИСПОЛНИТЕЛЬ ПОДТВЕРДИЛ!</b>\n\n"
+            f"Сделка: #{deal_id}\n"
+            f"Исполнитель заявляет что выполнил задание\n\n"
+            f"Проверьте в игре и подтвердите!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Подтверждаю", callback_data=f"approve_deal_{deal_id}")],
+                [InlineKeyboardButton(text="💬 Чат", callback_data=f"msg_{deal_id}")],
+                [InlineKeyboardButton(text="⚠️ Обратиться к модератору", callback_data="contact_moderator")]
+            ])
+        )
+    except:
+        pass
     
     try:
         await query.message.edit_text(
-            f"✅ <b>Вы подтвердили выполнение!</b>\n\n"
-            f"Ожидание подтверждения продавца...",
+            f"✅ Вы подтвердили!\n\n"
+            f"Сделка #{deal_id}\n"
+            f"Ожидание проверки продавца...",
             reply_markup=get_main_menu()
         )
     except TelegramBadRequest:
         pass
 
-@router.callback_query(F.data.startswith("verify_deal_"))
-async def verify_deal_handler(query: CallbackQuery):
+@router.callback_query(F.data.startswith("approve_deal_"))
+async def approve_deal_handler(query: CallbackQuery):
     await query.answer()
-    deal_id = int(query.data.replace("verify_deal_", ""))
+    deal_id = int(query.data.replace("approve_deal_", ""))
     seller_id = query.from_user.id
     
     deal = get_deal(deal_id)
@@ -801,12 +1137,12 @@ async def verify_deal_handler(query: CallbackQuery):
     
     if seller_id != seller_id_db:
         try:
-            await query.message.edit_text("❌ Вы не продавец в этой сделке!", reply_markup=get_main_menu())
+            await query.message.edit_text("❌ Вы не продавец!", reply_markup=get_main_menu())
         except TelegramBadRequest:
             pass
         return
     
-    # Проверяем баланс продавца
+    # Проверяем баланс
     rate = get_usdt_rub_rate()
     seller_balance = get_wallet(seller_id)
     amount_rub = convert_usd_to_rub(amount_usd)
@@ -814,7 +1150,7 @@ async def verify_deal_handler(query: CallbackQuery):
     if seller_balance < amount_rub:
         try:
             await query.message.edit_text(
-                f"❌ Недостаточно средств на счете!\n\n"
+                f"❌ Недостаточно средств!\n\n"
                 f"Нужно: ${amount_usd}\n"
                 f"Баланс: ${seller_balance / rate:.2f}",
                 reply_markup=get_main_menu()
@@ -823,16 +1159,28 @@ async def verify_deal_handler(query: CallbackQuery):
             pass
         return
     
-    # ✅ ЗАВЕРШАЕМ СДЕЛКУ - ПЕРЕВОДИМ ДЕНЬГИ
+    # ✅ ЗАВЕРШАЕМ СДЕЛКУ
     if complete_deal(deal_id):
         commission = amount_usd * 0.05
         buyer_amount = amount_usd - commission
+        
+        # Отправляем исполнителю уведомление
+        try:
+            await bot.send_message(
+                buyer_id,
+                f"✅ <b>СДЕЛКА ЗАВЕРШЕНА!</b>\n\n"
+                f"Сделка: #{deal_id}\n"
+                f"Вы получили: ${buyer_amount}\n"
+                f"Спасибо за выполнение!"
+            )
+        except:
+            pass
         
         try:
             await query.message.edit_text(
                 f"✅ <b>Сделка завершена!</b>\n\n"
                 f"Вы отправили: ${amount_usd}\n"
-                f"Покупатель получит: ${buyer_amount}\n"
+                f"Исполнитель получил: ${buyer_amount}\n"
                 f"Комиссия: ${commission}",
                 reply_markup=get_main_menu()
             )
@@ -840,16 +1188,21 @@ async def verify_deal_handler(query: CallbackQuery):
             pass
     else:
         try:
-            await query.message.edit_text("❌ Ошибка завершения сделки!", reply_markup=get_main_menu())
+            await query.message.edit_text("❌ Ошибка завершения!", reply_markup=get_main_menu())
         except TelegramBadRequest:
             pass
 
-@router.callback_query(F.data == "my_deals")
-async def my_deals_handler(query: CallbackQuery):
+@router.callback_query(F.data == "contact_moderator")
+async def contact_moderator_handler(query: CallbackQuery):
     await query.answer()
-    user_id = query.from_user.id
     try:
-        await query.message.edit_text("🤝 Мои сделки\n\n(Функция в разработке)", reply_markup=get_main_menu())
+        await query.message.edit_text(
+            f"📞 <b>МОДЕРАТОР</b>\n\n"
+            f"Администратор: @oxide_escort_bot\n"
+            f"ID: {MODERATOR_ID}\n\n"
+            f"Напишите свою проблему модератору для разрешения спора.",
+            reply_markup=get_main_menu()
+        )
     except TelegramBadRequest:
         pass
 
@@ -871,7 +1224,6 @@ async def create_offer_category(query: CallbackQuery, state: FSMContext):
     category = query.data.replace("offer_cat_", "")
     user_id = query.from_user.id
     
-    # ✅ НОВОЕ: Проверяем есть ли уже объявление этой категории
     if check_duplicate_offer(user_id, category):
         try:
             await query.message.edit_text(
@@ -918,7 +1270,8 @@ async def create_offer_price(message: Message, state: FSMContext):
                 f"✅ <b>Объявление создано!</b>\n\n"
                 f"Категория: {CATEGORIES[category]}\n"
                 f"Количество: {quantity}\n"
-                f"Цена: ${price} (≈{price_rub:.0f}р)",
+                f"Цена: ${price} (≈{price_rub:.0f}р)\n\n"
+                f"Ждите пока кто-нибудь примет ваше задание!",
                 reply_markup=get_main_menu()
             )
             logger.info(f"Offer created: id={offer_id}, user={user_id}")
@@ -1127,8 +1480,27 @@ async def check_payment(query: CallbackQuery):
 @router.callback_query(F.data == "profile")
 async def profile_handler(query: CallbackQuery):
     await query.answer()
+    user_id = query.from_user.id
+    profile = get_profile(user_id)
+    
+    if profile:
+        user_id_db, username, nickname, rating, completed_deals = profile
+        text = f"👤 <b>Мой профиль</b>\n\n" \
+                f"Пользователь: @{username}\n" \
+                f"Ник в игре: {nickname or 'Не установлен'}\n" \
+                f"⭐ Рейтинг: {rating}/5.0\n" \
+                f"✅ Завершено сделок: {completed_deals}"
+        
+        keyboard = [
+            [InlineKeyboardButton(text="🎮 Установить ник", callback_data="set_nickname")],
+            [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+        ]
+    else:
+        text = "👤 Профиль не найден"
+        keyboard = [[InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]]
+    
     try:
-        await query.message.edit_text("👤 Профиль\n\n⭐ Рейтинг: 0/5", reply_markup=get_main_menu())
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
     except TelegramBadRequest:
         pass
 
@@ -1152,7 +1524,18 @@ async def history_handler(query: CallbackQuery):
 async def help_handler(query: CallbackQuery):
     await query.answer()
     try:
-        await query.message.edit_text("❓ Маркетплейс Oxide\n\n💰 Комиссия 5%\n💵 USDT в @CryptoBot", reply_markup=get_main_menu())
+        await query.message.edit_text(
+            "❓ <b>Справка</b>\n\n"
+            "🛍️ <b>Как это работает:</b>\n"
+            "1. Создай объявление с ценой\n"
+            "2. Исполнитель примет задание\n"
+            "3. Исполнитель подтвердит выполнение\n"
+            "4. Ты проверишь и подтвердишь\n"
+            "5. Деньги переведутся исполнителю\n\n"
+            "💰 Комиссия: 5%\n"
+            "📞 Модератор: @oxide_escort_bot",
+            reply_markup=get_main_menu()
+        )
     except TelegramBadRequest:
         pass
 
@@ -1163,6 +1546,62 @@ async def return_main(query: CallbackQuery):
         await query.message.edit_text("🎯 Меню", reply_markup=get_main_menu())
     except TelegramBadRequest:
         pass
+
+# ========== МОДЕРАТОР ==========
+
+@router.callback_query(F.data == "mod_panel")
+async def mod_panel_handler(query: CallbackQuery):
+    if query.from_user.id != MODERATOR_ID:
+        await query.answer("❌ Только модератор!", show_alert=True)
+        return
+    
+    try:
+        await query.message.edit_text(
+            "🔒 <b>ПАНЕЛЬ МОДЕРАТОРА</b>\n\n"
+            "Только администратор может:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🚫 Забанить игрока", callback_data="ban_player")],
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+            ])
+        )
+    except TelegramBadRequest:
+        pass
+
+@router.callback_query(F.data == "ban_player")
+async def ban_player_start(query: CallbackQuery, state: FSMContext):
+    if query.from_user.id != MODERATOR_ID:
+        await query.answer("❌ Только модератор!", show_alert=True)
+        return
+    
+    await query.answer()
+    await query.message.answer("🚫 <b>Введите ник игрока для бана:</b>")
+    await state.set_state(BanStates.nickname)
+
+@router.message(StateFilter(BanStates.nickname))
+async def ban_nickname_handler(message: Message, state: FSMContext):
+    nickname = message.text.strip()
+    await state.update_data(nickname=nickname)
+    await message.answer("📝 <b>Укажите причину бана:</b>")
+    await state.set_state(BanStates.reason)
+
+@router.message(StateFilter(BanStates.reason))
+async def ban_reason_handler(message: Message, state: FSMContext):
+    data = await state.get_data()
+    nickname = data.get('nickname')
+    reason = message.text.strip()
+    
+    if ban_player(nickname, reason, MODERATOR_ID):
+        await message.answer(
+            f"✅ <b>Игрок забанен!</b>\n\n"
+            f"Ник: {nickname}\n"
+            f"Причина: {reason}",
+            reply_markup=get_main_menu()
+        )
+        logger.info(f"Player banned: {nickname}, reason: {reason}")
+    else:
+        await message.answer("❌ Ошибка!", reply_markup=get_main_menu())
+    
+    await state.clear()
 
 async def on_startup(bot: Bot) -> None:
     try:
@@ -1191,9 +1630,9 @@ async def main():
     await site.start()
     logger.info("✅ PostgreSQL")
     logger.info("✅ Database")
-    logger.info("✅ All tokens loaded from environment variables")
-    logger.info("✅ Escrow system activated - money transferred only after both confirmations")
-    logger.info("✅ Duplicate category check activated - max 1 offer per category")
+    logger.info("✅ Escrow system activated")
+    logger.info("✅ Chat system activated")
+    logger.info("✅ Moderator ban system activated")
     while True:
         await asyncio.sleep(3600)
 
