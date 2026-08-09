@@ -9,7 +9,7 @@ from aiohttp import web, ClientSession
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart, StateFilter
+from aiogram.filters import CommandStart, StateFilter, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiogram.fsm.context import FSMContext
@@ -827,6 +827,24 @@ def get_main_menu():
         [InlineKeyboardButton(text="📜 История", callback_data="history")],
         [InlineKeyboardButton(text="📚 Помощь", callback_data="help_menu")],
     ])
+
+@router.message(Command("mod"))
+async def mod_command(message: Message):
+    user_id = message.from_user.id
+    
+    if user_id != MODERATOR_ID:
+        await message.answer("❌ Только модератор может использовать эту команду!", reply_markup=get_main_menu())
+        return
+    
+    await message.answer(
+        "🔒 <b>ПАНЕЛЬ МОДЕРАТОРА</b>\n\n"
+        f"Модератор: @{message.from_user.username or f'user{user_id}'}\n"
+        f"ID: {user_id}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚫 Забанить игрока", callback_data="ban_player")],
+            [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+        ])
+    )
 
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext):
@@ -2051,9 +2069,14 @@ async def profile_handler(query: CallbackQuery):
         text = f"👤 <b>Профиль</b>\n\n" \
                 f"@{username}\n" \
                 f"Ник: Не установлен\n" \
-                f"⭐ 3.0/3.0\n" \
+                f"⭐ 2.0/3.0\n" \
                 f"✅ 0"
         keyboard = [[InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]]
+    
+    # Добавляем кнопку модератора если это модератор
+    if user_id == MODERATOR_ID:
+        text += "\n\n🔒 <b>МОДЕРАТОР</b>"
+        keyboard.insert(0, [InlineKeyboardButton(text="🔐 Модератор Панель", callback_data="mod_panel")])
     
     try:
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
