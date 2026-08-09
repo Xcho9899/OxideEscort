@@ -103,6 +103,10 @@ def init_db():
             cryptobot_account_created BOOLEAN DEFAULT FALSE
         )
         ''')
+        # ✅ Добавляем колонку если её нет
+        cursor.execute('''
+        ALTER TABLE user_profile ADD COLUMN IF NOT EXISTS cryptobot_account_created BOOLEAN DEFAULT FALSE
+        ''')
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_history (
             id SERIAL PRIMARY KEY,
@@ -266,9 +270,11 @@ def is_cryptobot_account_created(user_id):
 def set_cryptobot_account_created(user_id):
     conn = get_db()
     if not conn:
+        logger.error(f"❌ Cannot get DB connection for user {user_id}")
         return False
     cursor = conn.cursor()
     try:
+        logger.info(f"Updating cryptobot_account_created for user {user_id}")
         cursor.execute('''
         UPDATE user_profile SET cryptobot_account_created = TRUE WHERE user_id = %s
         ''', (user_id,))
@@ -285,7 +291,7 @@ def set_cryptobot_account_created(user_id):
 
 def transfer_to_user(amount_usd: float, user_id: int):
     try:
-        logger.info(f"Creating transfer: ${amount_usd} to user {user_id}")
+        logger.info(f"🔄 Starting transfer: ${amount_usd} to user {user_id}")
         headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN, "Content-Type": "application/json"}
         payload = {
             "user_id": user_id,
@@ -294,14 +300,15 @@ def transfer_to_user(amount_usd: float, user_id: int):
             "spend_from": "wallet"
         }
         
-        logger.info(f"Transfer payload: {payload}")
+        logger.info(f"📤 Transfer payload: {payload}")
         response = requests.post(f"{CRYPTOBOT_API}/transfer", headers=headers, json=payload, timeout=10)
         
-        logger.info(f"CryptoBot transfer status: {response.status_code}")
-        logger.info(f"CryptoBot transfer response: {response.text}")
+        logger.info(f"📥 CryptoBot transfer status: {response.status_code}")
+        logger.info(f"📥 CryptoBot transfer response: {response.text}")
         
         if response.status_code == 200:
             data = response.json()
+            logger.info(f"Response data ok field: {data.get('ok')}")
             if data.get('ok'):
                 transfer_data = data.get('result', {})
                 transfer_id = transfer_data.get('transfer_id')
@@ -312,6 +319,8 @@ def transfer_to_user(amount_usd: float, user_id: int):
         return False, response.text
     except Exception as e:
         logger.error(f"❌ Transfer error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False, str(e)
 
 def get_invoice(invoice_id):
@@ -1277,18 +1286,29 @@ async def confirm_cryptobot_handler(query: CallbackQuery):
     amount_usd = float(parts[0])
     user_id = int(parts[1])
     
+    logger.info(f"Confirming CryptoBot account: user={user_id}, amount=${amount_usd}")
+    
     # Отмечаем что счет создан
     if set_cryptobot_account_created(user_id):
+        logger.info(f"✅ Account marked as created for user {user_id}")
+        
         # Делаем transfer сразу
+        logger.info(f"Starting transfer for user {user_id}, amount=${amount_usd}")
         success, transfer_id = transfer_to_user(amount_usd, user_id)
         
+        logger.info(f"Transfer result: success={success}, transfer_id={transfer_id}")
+        
         if success:
+            logger.info(f"Transfer successful! Updating wallet for user {user_id}")
             rate = get_usdt_rub_rate()
             balance = get_wallet(user_id)
             amount_rub = convert_usd_to_rub(amount_usd)
             new_balance = balance - amount_rub
             
+            logger.info(f"Old balance: {balance}р, amount: {amount_rub}р, new balance: {new_balance}р")
+            
             if update_wallet(user_id, new_balance):
+                logger.info(f"✅ Wallet updated successfully")
                 add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd}')
                 save_withdrawal(user_id, amount_usd, 'success', transfer_id)
                 
@@ -1305,16 +1325,19 @@ async def confirm_cryptobot_handler(query: CallbackQuery):
                 except TelegramBadRequest:
                     pass
             else:
+                logger.error(f"❌ Failed to update wallet for user {user_id}")
                 try:
                     await query.message.edit_text("❌ Ошибка баланса!", reply_markup=get_main_menu())
                 except TelegramBadRequest:
                     pass
         else:
+            logger.error(f"❌ Transfer failed: {transfer_id}")
             try:
                 await query.message.edit_text(f"❌ Ошибка перевода: {transfer_id}", reply_markup=get_main_menu())
             except TelegramBadRequest:
                 pass
     else:
+        logger.error(f"❌ Failed to mark account as created for user {user_id}")
         try:
             await query.message.edit_text("❌ Ошибка при сохранении!", reply_markup=get_main_menu())
         except TelegramBadRequest:
