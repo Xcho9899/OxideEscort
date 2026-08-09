@@ -1779,43 +1779,161 @@ async def withdraw_start(query: CallbackQuery, state: FSMContext):
     rate = get_usdt_rub_rate()
     balance = get_wallet(user_id)
     balance_usd = balance / rate if rate else 0
+    
     if balance_usd < 1:
         try:
-            await query.message.edit_text(f"❌ Минимум $1\n\nБаланс: ${balance_usd:.2f}", reply_markup=get_main_menu())
+            await query.message.edit_text(
+                f"❌ Минимум $1\n\n"
+                f"Баланс: ${balance_usd:.2f}",
+                reply_markup=get_main_menu()
+            )
         except TelegramBadRequest:
             pass
     else:
-        await query.message.answer(f"💰 Сумма (USD):\n\nБаланс: ${balance_usd:.2f}")
+        keyboard = [
+            [InlineKeyboardButton(text="MAX", callback_data=f"withdraw_max_{balance_usd:.2f}")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="wallet")],
+            [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+        ]
+        await query.message.answer(
+            f"💰 Сумма (USD):\n\n"
+            f"💵 Баланс: ${balance_usd:.2f}\n"
+            f"💡 Минимум: $1",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+        )
         await state.set_state(WithdrawStates.amount)
 
-@router.message(StateFilter(WithdrawStates.amount), F.text)
-async def withdraw_amount(message: Message, state: FSMContext):
+@router.callback_query(F.data.startswith("withdraw_max_"))
+async def withdraw_max_handler(query: CallbackQuery, state: FSMContext):
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Парсим максимальную сумму из callback_data
+    max_amount_str = query.data.replace("withdraw_max_", "")
+    
     try:
-        amount_usd = float(message.text)
-        user_id = message.from_user.id
+        amount_usd = float(max_amount_str)
+    except ValueError:
+        try:
+            await query.message.edit_text("❌ Ошибка!", reply_markup=get_main_menu())
+        except TelegramBadRequest:
+            pass
+        await state.clear()
+        return
+    
+    logger.info(f"🔄 MAX Withdraw from user {user_id}: ${amount_usd}")
+    
+    try:
         rate = get_usdt_rub_rate()
         balance = get_wallet(user_id)
         balance_usd = balance / rate if rate else 0
         
+        logger.info(f"📊 Balance: ${balance_usd:.2f}, max_amount: ${amount_usd}")
+        
         if amount_usd < 1:
-            await message.answer("❌ Минимум $1!", reply_markup=get_main_menu())
+            await query.message.edit_text("❌ Минимум $1!", reply_markup=get_main_menu())
             await state.clear()
             return
         
         if amount_usd > balance_usd:
-            await message.answer(f"❌ Недостаточно!\n\nБаланс: ${balance_usd:.2f}", reply_markup=get_main_menu())
+            await query.message.edit_text(f"❌ Недостаточно!\n\nБаланс: ${balance_usd:.2f}", reply_markup=get_main_menu())
             await state.clear()
             return
         
+        logger.info(f"🔄 Creating check for user {user_id}, amount ${amount_usd}")
         success, check_url_or_error, check_id = create_check(amount_usd, user_id)
+        
+        logger.info(f"📤 Check result: success={success}")
         
         if success:
             amount_rub = convert_usd_to_rub(amount_usd)
             new_balance = balance - amount_rub
             
+            logger.info(f"💳 Updating wallet: new_balance={new_balance}")
+            
             if update_wallet(user_id, new_balance):
                 add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd}')
                 save_withdrawal(user_id, amount_usd, 'success', check_id)
+                
+                logger.info(f"✅ Withdrawal successful!")
+                
+                keyboard = [[InlineKeyboardButton(text="💳 Забрать в CryptoBot", url=check_url_or_error)]]
+                try:
+                    await query.message.edit_text(
+                        f"✅ <b>ЧЕК СОЗДАН!</b>\n\n"
+                        f"Сумма: ${amount_usd}\n"
+                        f"Новый баланс: {new_balance:.0f}р\n\n"
+                        f"Нажмите кнопку и заберите свои деньги в @CryptoBot! 🚀",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+                    )
+                except TelegramBadRequest:
+                    pass
+            else:
+                logger.error(f"❌ Wallet update failed")
+                try:
+                    await query.message.edit_text("❌ Ошибка баланса!", reply_markup=get_main_menu())
+                except TelegramBadRequest:
+                    pass
+        else:
+            logger.error(f"❌ Check creation failed: {check_url_or_error}")
+            try:
+                await query.message.edit_text(f"❌ Ошибка вывода!\n\n{check_url_or_error}", reply_markup=get_main_menu())
+            except TelegramBadRequest:
+                pass
+        
+        await state.clear()
+    except Exception as e:
+        logger.error(f"❌ Error in withdraw_max: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        try:
+            await query.message.edit_text(f"❌ Ошибка! {str(e)}", reply_markup=get_main_menu())
+        except TelegramBadRequest:
+            pass
+        await state.clear()
+
+@router.message(StateFilter(WithdrawStates.amount), F.text)
+async def withdraw_amount(message: Message, state: FSMContext):
+    logger.info(f"🔄 Withdraw request from user {message.from_user.id}: {message.text}")
+    try:
+        amount_usd = float(message.text)
+        logger.info(f"✅ Amount parsed: ${amount_usd}")
+        
+        user_id = message.from_user.id
+        rate = get_usdt_rub_rate()
+        balance = get_wallet(user_id)
+        balance_usd = balance / rate if rate else 0
+        
+        logger.info(f"📊 Balance check: balance={balance}р, balance_usd=${balance_usd:.2f}, rate={rate}")
+        
+        if amount_usd < 1:
+            logger.warning(f"❌ Amount too small: ${amount_usd}")
+            await message.answer("❌ Минимум $1!", reply_markup=get_main_menu())
+            await state.clear()
+            return
+        
+        if amount_usd > balance_usd:
+            logger.warning(f"❌ Insufficient balance: need ${amount_usd}, have ${balance_usd:.2f}")
+            await message.answer(f"❌ Недостаточно!\n\nБаланс: ${balance_usd:.2f}", reply_markup=get_main_menu())
+            await state.clear()
+            return
+        
+        logger.info(f"🔄 Creating check for user {user_id}, amount ${amount_usd}")
+        success, check_url_or_error, check_id = create_check(amount_usd, user_id)
+        
+        logger.info(f"📤 Check creation result: success={success}, check_id={check_id}")
+        
+        if success:
+            amount_rub = convert_usd_to_rub(amount_usd)
+            new_balance = balance - amount_rub
+            
+            logger.info(f"💳 Updating wallet: {user_id}, old_balance={balance}, new_balance={new_balance}")
+            
+            if update_wallet(user_id, new_balance):
+                add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd}')
+                save_withdrawal(user_id, amount_usd, 'success', check_id)
+                
+                logger.info(f"✅ Withdrawal successful for user {user_id}")
                 
                 keyboard = [[InlineKeyboardButton(text="💳 Забрать в CryptoBot", url=check_url_or_error)]]
                 await message.answer(
@@ -1826,13 +1944,22 @@ async def withdraw_amount(message: Message, state: FSMContext):
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
                 )
             else:
-                await message.answer("❌ Ошибка!", reply_markup=get_main_menu())
+                logger.error(f"❌ Failed to update wallet for user {user_id}")
+                await message.answer("❌ Ошибка баланса!", reply_markup=get_main_menu())
         else:
-            await message.answer(f"❌ {check_url_or_error}", reply_markup=get_main_menu())
+            logger.error(f"❌ Check creation failed: {check_url_or_error}")
+            await message.answer(f"❌ Ошибка вывода!\n\n{check_url_or_error}", reply_markup=get_main_menu())
         
         await state.clear()
-    except ValueError:
-        await message.answer("❌ Число!", reply_markup=get_main_menu())
+    except ValueError as e:
+        logger.error(f"❌ ValueError in withdraw: {e}")
+        await message.answer("❌ Введите число (например: 10)!", reply_markup=get_main_menu())
+        await state.clear()
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in withdraw: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        await message.answer(f"❌ Ошибка! {str(e)}", reply_markup=get_main_menu())
         await state.clear()
 
 @router.callback_query(F.data.startswith("check_"))
