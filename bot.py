@@ -98,7 +98,7 @@ def init_db():
             user_id BIGINT PRIMARY KEY,
             username VARCHAR(255),
             nickname VARCHAR(255),
-            rating DECIMAL(3, 2) DEFAULT 3.0,
+            rating DECIMAL(2, 1) DEFAULT 2.0,
             completed_deals INT DEFAULT 0
         )
         ''')
@@ -159,7 +159,7 @@ def init_db():
         )
         ''')
         cursor.execute('''
-        UPDATE user_profile SET rating = 3.0 WHERE user_id = %s
+        UPDATE user_profile SET rating = 2.0 WHERE user_id = %s
         ''', (MODERATOR_ID,))
         conn.commit()
         logger.info("✅ Database tables created")
@@ -825,6 +825,7 @@ def get_main_menu():
         [InlineKeyboardButton(text="💳 Кошелек", callback_data="wallet")],
         [InlineKeyboardButton(text="💰 Мои пополнения", callback_data="my_deposits")],
         [InlineKeyboardButton(text="📜 История", callback_data="history")],
+        [InlineKeyboardButton(text="📚 Помощь", callback_data="help_menu")],
     ])
 
 @router.message(CommandStart())
@@ -989,14 +990,14 @@ async def view_profile_handler(query: CallbackQuery):
         text = f"👤 <b>Профиль</b>\n\n" \
                 f"@{username or f'user{user_id}'}\n" \
                 f"Ник: {nickname or 'Не установлен'}\n" \
-                f"⭐ {rating}/5.0\n" \
+                f"⭐ {rating}/3.0\n" \
                 f"✅ Сделок: {completed_deals}"
         keyboard = [[InlineKeyboardButton(text="⬅️ Назад", callback_data="return_main")]]
     else:
         text = f"👤 <b>Профиль</b>\n\n" \
                 f"@user{user_id}\n" \
                 f"Ник: Не установлен\n" \
-                f"⭐ 3.0/5.0\n" \
+                f"⭐ 3.0/3.0\n" \
                 f"✅ Сделок: 0"
         keyboard = [[InlineKeyboardButton(text="⬅️ Назад", callback_data="return_main")]]
     
@@ -1199,7 +1200,7 @@ async def rate_handler(query: CallbackQuery):
                 await query.message.edit_text(
                     f"✅ <b>СПАСИБО!</b>\n\n"
                     f"Вы оценили исполнителя на {rating}⭐\n"
-                    f"Новый рейтинг: {new_rating}/5.0",
+                    f"Новый рейтинг: {new_rating}/3.0",
                     reply_markup=get_main_menu()
                 )
             except TelegramBadRequest:
@@ -1315,8 +1316,6 @@ async def confirm_deal_final(query: CallbackQuery):
             [InlineKeyboardButton(text="⭐", callback_data=f"rate_{deal_id}_{buyer_id}_1")],
             [InlineKeyboardButton(text="⭐⭐", callback_data=f"rate_{deal_id}_{buyer_id}_2")],
             [InlineKeyboardButton(text="⭐⭐⭐", callback_data=f"rate_{deal_id}_{buyer_id}_3")],
-            [InlineKeyboardButton(text="⭐⭐⭐⭐", callback_data=f"rate_{deal_id}_{buyer_id}_4")],
-            [InlineKeyboardButton(text="⭐⭐⭐⭐⭐", callback_data=f"rate_{deal_id}_{buyer_id}_5")],
             [InlineKeyboardButton(text="🎯 Активные сделки", callback_data="active_deals")],
             [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
         ]
@@ -1327,7 +1326,7 @@ async def confirm_deal_final(query: CallbackQuery):
                 f"Вы отправили: ${amount_usd}\n"
                 f"Исполнитель получил: ${buyer_amount}\n"
                 f"Комиссия: ${commission}\n\n"
-                f"⭐ <b>Оцените исполнителя:</b>",
+                f"⭐ <b>Оцените исполнителя (1-3⭐):</b>",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
             )
         except TelegramBadRequest:
@@ -1393,6 +1392,197 @@ async def my_deposits_handler(query: CallbackQuery):
         except TelegramBadRequest:
             pass
 
+@router.callback_query(F.data == "help_menu")
+async def help_menu_handler(query: CallbackQuery):
+    await query.answer()
+    try:
+        await query.message.edit_text(
+            "📚 <b>ПОМОЩЬ И РУКОВОДСТВА</b>\n\n"
+            "Выберите тему:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💳 Как пополнить баланс?", callback_data="help_deposit")],
+                [InlineKeyboardButton(text="💰 Как вывести деньги?", callback_data="help_withdraw")],
+                [InlineKeyboardButton(text="🎯 Как выполнять задания?", callback_data="help_tasks")],
+                [InlineKeyboardButton(text="📝 Как создать объявление?", callback_data="help_create_offer")],
+                [InlineKeyboardButton(text="⭐ Как работает рейтинг?", callback_data="help_rating")],
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+            ])
+        )
+    except TelegramBadRequest:
+        pass
+
+@router.callback_query(F.data == "help_deposit")
+async def help_deposit_handler(query: CallbackQuery):
+    await query.answer()
+    try:
+        await query.message.edit_text(
+            "💳 <b>КАК ПОПОЛНИТЬ БАЛАНС?</b>\n\n"
+            "1️⃣ Нажмите кнопку '💳 Кошелек' в меню\n\n"
+            "2️⃣ Нажмите '💳 Пополнить'\n\n"
+            "3️⃣ Введите сумму в рублях\n"
+            "   💡 Минимум: 81р (~$1)\n\n"
+            "4️⃣ Нажмите '💳 Оплатить'\n"
+            "   Откроется платеж через CryptoBot\n\n"
+            "5️⃣ Оплатите счет в @CryptoBot\n\n"
+            "6️⃣ Вернитесь в бот и нажмите '✅ Проверить платеж'\n\n"
+            "7️⃣ Деньги зачислятся на баланс! ✅\n\n"
+            "💡 Платежи приходят мгновенно!\n"
+            "💡 У вас нет счета в CryptoBot? Он создастся автоматически!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📚 Другие разделы", callback_data="help_menu")],
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+            ])
+        )
+    except TelegramBadRequest:
+        pass
+
+@router.callback_query(F.data == "help_withdraw")
+async def help_withdraw_handler(query: CallbackQuery):
+    await query.answer()
+    try:
+        await query.message.edit_text(
+            "💰 <b>КАК ВЫВЕСТИ ДЕНЬГИ?</b>\n\n"
+            "1️⃣ Нажмите '💳 Кошелек' в меню\n\n"
+            "2️⃣ Нажмите '💰 Вывести'\n\n"
+            "3️⃣ Введите сумму в долларах (USD)\n"
+            "   💡 Минимум: $1\n"
+            "   💡 Максимум: ваш баланс\n\n"
+            "4️⃣ Будет создан чек для вывода\n\n"
+            "5️⃣ Нажмите '💳 Забрать в CryptoBot'\n"
+            "   Откроется ваш кошелек в @CryptoBot\n\n"
+            "6️⃣ Деньги придут на ваш счет! ✅\n\n"
+            "⚠️ ВАЖНО:\n"
+            "• Вывод работает в USDT (криптовалюта)\n"
+            "• Комиссия платформы: 5%\n"
+            "• Деньги приходят за 1-2 минуты\n\n"
+            "Пример:\n"
+            "Вывод $10 → вы получите $9.50\n"
+            "$0.50 комиссия платформы",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📚 Другие разделы", callback_data="help_menu")],
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+            ])
+        )
+    except TelegramBadRequest:
+        pass
+
+@router.callback_query(F.data == "help_tasks")
+async def help_tasks_handler(query: CallbackQuery):
+    await query.answer()
+    try:
+        await query.message.edit_text(
+            "🎯 <b>КАК ВЫПОЛНЯТЬ ЗАДАНИЯ?</b>\n\n"
+            "<b>ВАРИАНТ 1: Чужие задания (исполнитель)</b>\n\n"
+            "1️⃣ Нажмите '🛍️ Доска услуг'\n\n"
+            "2️⃣ Выберите категорию услуги\n"
+            "   ⚒️ Фарм | 🏗️ Постройка | 🛡️ Помощь и другие\n\n"
+            "3️⃣ Смотрите доступные задания\n"
+            "   💰 $10 | 100 серы | 🏗️ Постройка\n\n"
+            "4️⃣ Нажмите '✅ Принять'\n\n"
+            "5️⃣ Выполните работу в игре\n\n"
+            "6️⃣ Нажмите '✅ Задание завершено'\n\n"
+            "7️⃣ Продавец проверит и подтвердит\n\n"
+            "8️⃣ Вы получите деньги - 5% комиссия\n\n"
+            "---\n\n"
+            "<b>ВАРИАНТ 2: Свои объявления (продавец)</b>\n\n"
+            "1️⃣ Нажмите '📝 Создать объявление'\n\n"
+            "2️⃣ Выберите категорию услуги\n\n"
+            "3️⃣ Введите количество (100, 500, 1000)\n\n"
+            "4️⃣ Введите цену в долларах ($10, $50)\n\n"
+            "5️⃣ Объявление появится на доске\n\n"
+            "6️⃣ Люди принимают ваше задание\n\n"
+            "7️⃣ После выполнения подтвердите\n\n"
+            "8️⃣ Деньги уходят из вашего баланса\n\n"
+            "💡 Или делайте ОБА ВАРИАНТА одновременно!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📚 Другие разделы", callback_data="help_menu")],
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+            ])
+        )
+    except TelegramBadRequest:
+        pass
+
+@router.callback_query(F.data == "help_create_offer")
+async def help_create_offer_handler(query: CallbackQuery):
+    await query.answer()
+    try:
+        await query.message.edit_text(
+            "📝 <b>КАК СОЗДАТЬ ОБЪЯВЛЕНИЕ?</b>\n\n"
+            "1️⃣ Нажмите '📝 Создать объявление'\n\n"
+            "2️⃣ Выберите категорию услуги:\n"
+            "   ⚒️ Фарм серы / Фарм металла\n"
+            "   🔩 Фарм дерева / 🏗️ Постройка\n"
+            "   ⛽ Фарм топливо / 🛡️ Помощь в рейдах\n"
+            "   🔧 Фарм металалома / 🔫 Установка турелей\n"
+            "   🚪 Скидка шкафа\n\n"
+            "3️⃣ Введите количество (только цифры)\n"
+            "   Примеры: 100, 500, 1000, 5000\n\n"
+            "4️⃣ Введите цену в долларах\n"
+            "   Примеры: $10, $50, $100\n\n"
+            "5️⃣ Объявление создано! ✅\n\n"
+            "ℹ️ ВАЖНО:\n"
+            "• У вас может быть только 1 объявление в категории\n"
+            "• Снять объявление можно в разделе 'Мои объявления'\n"
+            "• Когда кто-то принимает → объявление удаляется\n"
+            "• Оставшиеся деньги на балансе в эскроу\n\n"
+            "💡 ПРИМЕРЫ ПРЕДЛОЖЕНИЙ:\n"
+            "⚒️ Фарм серы 500шт за $25\n"
+            "🏗️ Постройка базы за $50\n"
+            "🛡️ Помощь в рейдах за $15",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📚 Другие разделы", callback_data="help_menu")],
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+            ])
+        )
+    except TelegramBadRequest:
+        pass
+
+@router.callback_query(F.data == "help_rating")
+async def help_rating_handler(query: CallbackQuery):
+    await query.answer()
+    try:
+        await query.message.edit_text(
+            "⭐ <b>КАК РАБОТАЕТ РЕЙТИНГ?</b>\n\n"
+            "<b>ЧТО ТАКОЕ РЕЙТИНГ?</b>\n"
+            "Это оценка вашей репутации в системе!\n\n"
+            "<b>НАЧАЛЬНЫЙ РЕЙТИНГ: 2.0⭐</b>\n\n"
+            "<b>МАКСИМАЛЬНЫЙ РЕЙТИНГ: 3.0⭐</b>\n\n"
+            "<b>КАК ПОВЫСИТЬ РЕЙТИНГ?</b>\n"
+            "1️⃣ Выполняйте задания хорошо\n"
+            "2️⃣ После каждой завершенной сделки\n"
+            "   продавец оценивает вас (1, 2 или 3⭐)\n"
+            "3️⃣ Ваш новый рейтинг = (старый + оценка) / 2\n\n"
+            "<b>ПРИМЕРЫ РАСЧЕТА:</b>\n"
+            "Рейтинг: 2.0⭐\n"
+            "Оценка: 3⭐ (отлично)\n"
+            "Новый рейтинг = (2.0 + 3) / 2 = 2.5⭐ ✅\n\n"
+            "Рейтинг: 2.5⭐\n"
+            "Оценка: 3⭐ (отлично)\n"
+            "Новый рейтинг = (2.5 + 3) / 2 = 2.75⭐\n\n"
+            "Рейтинг: 2.75⭐\n"
+            "Оценка: 3⭐ (отлично)\n"
+            "Новый рейтинг = (2.75 + 3) / 2 = 2.88⭐\n\n"
+            "Рейтинг: 2.0⭐\n"
+            "Оценка: 1⭐ (плохо)\n"
+            "Новый рейтинг = (2.0 + 1) / 2 = 1.5⭐\n\n"
+            "<b>ЗАЧЕМ НУЖЕН ВЫСОКИЙ РЕЙТИНГ?</b>\n"
+            "✅ Люди охотнее берут ваши задания\n"
+            "✅ Вы кажетесь надежнее\n"
+            "✅ Больше доверия от других игроков\n"
+            "✅ Рост репутации в сообществе\n\n"
+            "<b>РЕЙТИНГ ВИДЯТ ВСЕ!</b>\n"
+            "При просмотре профиля видно:\n"
+            "👤 @username\n"
+            "⭐ 2.8/3.0 ← ВОТ ЗДЕСЬ!\n"
+            "✅ Сделок: 25",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📚 Другие разделы", callback_data="help_menu")],
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+            ])
+        )
+    except TelegramBadRequest:
+        pass
+
 @router.callback_query(F.data == "contact_mod")
 async def contact_mod_handler(query: CallbackQuery):
     await query.answer()
@@ -1403,7 +1593,7 @@ async def contact_mod_handler(query: CallbackQuery):
         text = f"📞 <b>МОДЕРАТОР</b>\n\n" \
                 f"@{username}\n" \
                 f"Ник: {nickname or 'Не установлен'}\n" \
-                f"⭐ {rating}/5.0\n" \
+                f"⭐ {rating}/3.0\n" \
                 f"✅ Сделок: {completed_deals}\n\n" \
                 f"Обратитесь к модератору если возникли проблемы"
     else:
@@ -1727,14 +1917,14 @@ async def profile_handler(query: CallbackQuery):
         text = f"👤 <b>Профиль</b>\n\n" \
                 f"@{username_db or username}\n" \
                 f"Ник: {nickname or 'Не установлен'}\n" \
-                f"⭐ {rating}/5.0\n" \
+                f"⭐ {rating}/3.0\n" \
                 f"✅ {completed_deals}"
         keyboard = [[InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]]
     else:
         text = f"👤 <b>Профиль</b>\n\n" \
                 f"@{username}\n" \
                 f"Ник: Не установлен\n" \
-                f"⭐ 3.0/5.0\n" \
+                f"⭐ 3.0/3.0\n" \
                 f"✅ 0"
         keyboard = [[InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]]
     
