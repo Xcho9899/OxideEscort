@@ -121,6 +121,9 @@ def init_db():
         )
         ''')
         cursor.execute('''
+        DROP TABLE IF EXISTS deals
+        ''')
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS deals (
             id SERIAL PRIMARY KEY,
             offer_id INT,
@@ -291,7 +294,8 @@ def save_withdrawal(user_id, amount_usd, status, check_id=None):
         cursor.close()
         return_db(conn)
 
-def check_duplicate_offer(user_id, category, price):
+def check_duplicate_offer(user_id, category):
+    """✅ НОВОЕ: Проверка - есть ли уже объявление ЭТОЙ КАТЕГОРИИ"""
     conn = get_db()
     if not conn:
         return False
@@ -299,8 +303,8 @@ def check_duplicate_offer(user_id, category, price):
     try:
         cursor.execute('''
         SELECT id FROM offers 
-        WHERE user_id = %s AND category = %s AND price = %s AND status = %s
-        ''', (user_id, category, price, 'active'))
+        WHERE user_id = %s AND category = %s AND status = %s
+        ''', (user_id, category, 'active'))
         result = cursor.fetchone()
         return result is not None
     except:
@@ -416,7 +420,7 @@ def save_deal(offer_id, seller_id, buyer_id, amount_usd):
         ''', (offer_id, seller_id, buyer_id, amount_usd, 'pending'))
         deal_id = cursor.fetchone()[0]
         conn.commit()
-        logger.info(f"✅ Deal created: id={deal_id}, seller={seller_id}, buyer={buyer_id}")
+        logger.info(f"✅ Deal created: id={deal_id}, seller={seller_id}, buyer={buyer_id}, amount=${amount_usd}")
         return deal_id
     except Exception as e:
         logger.error(f"❌ Deal save error: {e}")
@@ -444,7 +448,6 @@ def get_deal(deal_id):
         return_db(conn)
 
 def update_deal_confirmation(deal_id, role, confirmed):
-    """role = 'seller' или 'buyer'"""
     conn = get_db()
     if not conn:
         return False
@@ -466,13 +469,11 @@ def update_deal_confirmation(deal_id, role, confirmed):
         return_db(conn)
 
 def complete_deal(deal_id):
-    """Завершить сделку и перевести деньги"""
     conn = get_db()
     if not conn:
         return False
     cursor = conn.cursor()
     try:
-        # Получаем информацию о сделке
         cursor.execute('''
         SELECT seller_id, buyer_id, amount_usd::double precision FROM deals WHERE id = %s
         ''', (deal_id,))
@@ -483,13 +484,13 @@ def complete_deal(deal_id):
         seller_id, buyer_id, amount_usd = result
         rate = get_usdt_rub_rate()
         
-        # Вычитаем деньги у продавца
+        # Вычитаем у продавца
         seller_balance = get_wallet(seller_id)
         amount_rub = convert_usd_to_rub(amount_usd)
         new_seller_balance = seller_balance - amount_rub
         update_wallet(seller_id, new_seller_balance)
         
-        # Даем деньги покупателю (минус комиссия 5%)
+        # Даем покупателю (минус комиссия 5%)
         commission = amount_usd * 0.05
         buyer_amount = amount_usd - commission
         buyer_amount_rub = convert_usd_to_rub(buyer_amount)
@@ -497,11 +498,10 @@ def complete_deal(deal_id):
         new_buyer_balance = buyer_balance + buyer_amount_rub
         update_wallet(buyer_id, new_buyer_balance)
         
-        # Обновляем статус сделки
+        # Обновляем статус
         cursor.execute("UPDATE deals SET status = %s WHERE id = %s", ('completed', deal_id))
         conn.commit()
         
-        # Добавляем историю
         add_history(seller_id, 'deal_payment', amount_rub, f'Оплата за задание #{deal_id}')
         add_history(buyer_id, 'deal_complete', buyer_amount_rub, f'Получено за задание #{deal_id} (комиссия: ${commission})')
         
@@ -764,7 +764,6 @@ async def deal_done_handler(query: CallbackQuery):
     
     deal_id_db, offer_id, seller_id, buyer_id_db, amount_usd, status, seller_confirmed, buyer_confirmed = deal
     
-    # Только покупатель может подтвердить выполнение
     if buyer_id != buyer_id_db:
         try:
             await query.message.edit_text("❌ Вы не покупатель в этой сделке!", reply_markup=get_main_menu())
@@ -800,7 +799,6 @@ async def verify_deal_handler(query: CallbackQuery):
     
     deal_id_db, offer_id, seller_id_db, buyer_id, amount_usd, status, seller_confirmed, buyer_confirmed = deal
     
-    # Только продавец может подтвердить
     if seller_id != seller_id_db:
         try:
             await query.message.edit_text("❌ Вы не продавец в этой сделке!", reply_markup=get_main_menu())
@@ -829,7 +827,6 @@ async def verify_deal_handler(query: CallbackQuery):
     if complete_deal(deal_id):
         commission = amount_usd * 0.05
         buyer_amount = amount_usd - commission
-        amount_rub_buyer = convert_usd_to_rub(buyer_amount)
         
         try:
             await query.message.edit_text(
@@ -872,6 +869,21 @@ async def create_offer_start(query: CallbackQuery, state: FSMContext):
 async def create_offer_category(query: CallbackQuery, state: FSMContext):
     await query.answer()
     category = query.data.replace("offer_cat_", "")
+    user_id = query.from_user.id
+    
+    # ✅ НОВОЕ: Проверяем есть ли уже объявление этой категории
+    if check_duplicate_offer(user_id, category):
+        try:
+            await query.message.edit_text(
+                f"❌ У вас уже есть объявление по этой услуге!\n\n"
+                f"{CATEGORIES[category]}\n\n"
+                f"Можно только по 1 объявлению каждого типа",
+                reply_markup=get_main_menu()
+            )
+        except TelegramBadRequest:
+            pass
+        return
+    
     await state.update_data(category=category)
     await query.message.answer("📝 <b>Введите количество (только цифры)</b>\n\nНапример: 100, 50, 1000")
     await state.set_state(CreateOfferStates.quantity)
@@ -897,16 +909,6 @@ async def create_offer_price(message: Message, state: FSMContext):
         category = data.get('category')
         quantity = data.get('quantity')
         user_id = message.from_user.id
-        
-        if check_duplicate_offer(user_id, category, price):
-            await message.answer(
-                f"❌ У вас уже есть такое объявление!\n\n"
-                f"Категория: {CATEGORIES[category]}\n"
-                f"Цена: ${price}",
-                reply_markup=get_main_menu()
-            )
-            await state.clear()
-            return
         
         offer_id = save_offer(user_id, category, quantity, price)
         
@@ -1191,6 +1193,7 @@ async def main():
     logger.info("✅ Database")
     logger.info("✅ All tokens loaded from environment variables")
     logger.info("✅ Escrow system activated - money transferred only after both confirmations")
+    logger.info("✅ Duplicate category check activated - max 1 offer per category")
     while True:
         await asyncio.sleep(3600)
 
