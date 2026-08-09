@@ -173,16 +173,20 @@ def init_db():
 def get_or_create_profile(user_id, username):
     conn = get_db()
     if not conn:
+        logger.error(f"❌ No DB connection")
         return False
     cursor = conn.cursor()
     try:
         cursor.execute('''
         INSERT INTO user_profile (user_id, username) VALUES (%s, %s)
-        ON CONFLICT (user_id) DO NOTHING
+        ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username
         ''', (user_id, username))
         conn.commit()
+        logger.info(f"✅ Profile created/updated: {user_id}")
         return True
-    except:
+    except Exception as e:
+        logger.error(f"❌ Profile error: {e}")
+        conn.rollback()
         return False
     finally:
         cursor.close()
@@ -191,15 +195,41 @@ def get_or_create_profile(user_id, username):
 def get_profile(user_id):
     conn = get_db()
     if not conn:
+        logger.error(f"❌ No DB connection for profile {user_id}")
         return None
     cursor = conn.cursor()
     try:
         cursor.execute('''
         SELECT user_id, username, nickname, rating, completed_deals FROM user_profile WHERE user_id = %s
         ''', (user_id,))
-        return cursor.fetchone()
-    except:
+        result = cursor.fetchone()
+        if result:
+            logger.info(f"✅ Profile found: {user_id}")
+            return result
+        else:
+            logger.warning(f"⚠️ Profile not found: {user_id}")
+            return None
+    except Exception as e:
+        logger.error(f"❌ Get profile error: {e}")
         return None
+    finally:
+        cursor.close()
+        return_db(conn)
+
+def get_pending_invoices(user_id):
+    conn = get_db()
+    if not conn:
+        return []
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        SELECT invoice_id, amount_usd::double precision, status, created_at 
+        FROM invoices WHERE user_id = %s AND status = %s
+        ORDER BY created_at DESC
+        ''', (user_id, 'pending'))
+        return cursor.fetchall()
+    except:
+        return []
     finally:
         cursor.close()
         return_db(conn)
@@ -774,7 +804,10 @@ async def start(message: Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
     username = message.from_user.username or f"user{user_id}"
+    
+    # Гарантируем что профиль существует
     get_or_create_profile(user_id, username)
+    
     await message.answer("👋 <b>OxideEscort - Маркетплейс услуг</b>\n\n🎮 Oxide Survival Island\n💵 USDT USD\n💰 Комиссия 5%", reply_markup=get_main_menu())
 
 @router.callback_query(F.data == "board")
@@ -833,6 +866,10 @@ async def view_offer_handler(query: CallbackQuery):
         except TelegramBadRequest:
             pass
         return
+    
+    # Гарантируем что профили существуют
+    get_or_create_profile(buyer_id, query.from_user.username or f"user{buyer_id}")
+    get_or_create_profile(seller_id, "unknown")
     
     price_rub = convert_usd_to_rub(price)
     text = f"📋 <b>Задание</b>\n\n" \
@@ -897,6 +934,7 @@ async def accept_offer_handler(query: CallbackQuery):
                 f"Смотрите в 'Активные сделки'",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="👤 Профиль продавца", callback_data=f"profile_{seller_id}")],
+                    [InlineKeyboardButton(text="🎯 Перейти в активные сделки", callback_data="active_deals")],
                     [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
                 ])
             )
@@ -912,18 +950,26 @@ async def accept_offer_handler(query: CallbackQuery):
 async def view_profile_handler(query: CallbackQuery):
     await query.answer()
     user_id = int(query.data.replace("profile_", ""))
+    
+    # Гарантируем что профиль существует
+    get_or_create_profile(user_id, f"user{user_id}")
+    
     profile = get_profile(user_id)
     
     if profile:
         user_id_db, username, nickname, rating, completed_deals = profile
         text = f"👤 <b>Профиль</b>\n\n" \
-                f"@{username}\n" \
+                f"@{username or f'user{user_id}'}\n" \
                 f"Ник: {nickname or 'Не установлен'}\n" \
                 f"⭐ {rating}/5.0\n" \
                 f"✅ Сделок: {completed_deals}"
         keyboard = [[InlineKeyboardButton(text="⬅️ Назад", callback_data="return_main")]]
     else:
-        text = "Профиль не найден"
+        text = f"👤 <b>Профиль</b>\n\n" \
+                f"@user{user_id}\n" \
+                f"Ник: Не установлен\n" \
+                f"⭐ 3.0/5.0\n" \
+                f"✅ Сделок: 0"
         keyboard = [[InlineKeyboardButton(text="⬅️ Назад", callback_data="return_main")]]
     
     try:
@@ -1009,7 +1055,7 @@ async def seller_deal_handler(query: CallbackQuery):
         keyboard.append([InlineKeyboardButton(text="✅ Подтверждаю", callback_data=f"approve_deal_{deal_id}")])
         keyboard.append([InlineKeyboardButton(text="⚠️ К модератору", callback_data="contact_mod")])
     
-    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="active_deals")])
+    keyboard.append([InlineKeyboardButton(text="🎯 Активные сделки", callback_data="active_deals")])
     
     try:
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
@@ -1057,7 +1103,7 @@ async def buyer_deal_handler(query: CallbackQuery):
             text += "✅ Вы подтвердили\n⏳ Ожидание проверки..."
     
     keyboard.append([InlineKeyboardButton(text="👤 Профиль продавца", callback_data=f"profile_{seller_id}")])
-    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="active_deals")])
+    keyboard.append([InlineKeyboardButton(text="🎯 Активные сделки", callback_data="active_deals")])
     
     try:
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
@@ -1099,7 +1145,8 @@ async def task_done_handler(query: CallbackQuery):
             f"#{deal_id}\n\n"
             f"⏳ Ожидание продавца...",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="active_deals")]
+                [InlineKeyboardButton(text="🎯 Перейти в активные сделки", callback_data="active_deals")],
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
             ])
         )
     except TelegramBadRequest:
@@ -1163,6 +1210,45 @@ async def approve_deal_handler(query: CallbackQuery):
             pass
         return
     
+    # ПРЕДУПРЕЖДЕНИЕ ДО ПОДТВЕРЖДЕНИЯ
+    try:
+        await query.message.edit_text(
+            f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
+            f"Вы уверены что задание #{deal_id} выполнено?\n\n"
+            f"{CATEGORIES.get(category, category)}\n"
+            f"${amount_usd}\n\n"
+            f"❗ После подтверждения деньги будут отправлены исполнителю!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ ДА, ПОДТВЕРЖДАЮ", callback_data=f"confirm_deal_{deal_id}")],
+                [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="active_deals")],
+            ])
+        )
+    except TelegramBadRequest:
+        pass
+
+@router.callback_query(F.data.startswith("confirm_deal_"))
+async def confirm_deal_final(query: CallbackQuery):
+    await query.answer()
+    deal_id = int(query.data.replace("confirm_deal_", ""))
+    seller_id = query.from_user.id
+    
+    deal = get_deal(deal_id)
+    if not deal:
+        try:
+            await query.message.edit_text("❌ Не найдено!", reply_markup=get_main_menu())
+        except TelegramBadRequest:
+            pass
+        return
+    
+    deal_id_db, offer_id, seller_id_db, buyer_id, amount_usd, category, quantity, status, seller_confirmed, buyer_confirmed = deal
+    
+    if seller_id != seller_id_db:
+        try:
+            await query.message.edit_text("❌ Вы не продавец!", reply_markup=get_main_menu())
+        except TelegramBadRequest:
+            pass
+        return
+    
     rate = get_usdt_rub_rate()
     seller_balance = get_wallet(seller_id)
     amount_rub = convert_usd_to_rub(amount_usd)
@@ -1203,6 +1289,7 @@ async def approve_deal_handler(query: CallbackQuery):
             [InlineKeyboardButton(text="⭐⭐⭐", callback_data=f"rate_{deal_id}_{buyer_id}_3")],
             [InlineKeyboardButton(text="⭐⭐⭐⭐", callback_data=f"rate_{deal_id}_{buyer_id}_4")],
             [InlineKeyboardButton(text="⭐⭐⭐⭐⭐", callback_data=f"rate_{deal_id}_{buyer_id}_5")],
+            [InlineKeyboardButton(text="🎯 Активные сделки", callback_data="active_deals")],
             [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
         ]
         
@@ -1518,18 +1605,27 @@ async def check_payment(query: CallbackQuery):
 async def profile_handler(query: CallbackQuery):
     await query.answer()
     user_id = query.from_user.id
+    username = query.from_user.username or f"user{user_id}"
+    
+    # Гарантируем что профиль существует
+    get_or_create_profile(user_id, username)
+    
     profile = get_profile(user_id)
     
     if profile:
-        user_id_db, username, nickname, rating, completed_deals = profile
+        user_id_db, username_db, nickname, rating, completed_deals = profile
         text = f"👤 <b>Профиль</b>\n\n" \
-                f"@{username}\n" \
+                f"@{username_db or username}\n" \
                 f"Ник: {nickname or 'Не установлен'}\n" \
                 f"⭐ {rating}/5.0\n" \
                 f"✅ {completed_deals}"
         keyboard = [[InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]]
     else:
-        text = "Профиль не найден"
+        text = f"👤 <b>Профиль</b>\n\n" \
+                f"@{username}\n" \
+                f"Ник: Не установлен\n" \
+                f"⭐ 3.0/5.0\n" \
+                f"✅ 0"
         keyboard = [[InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]]
     
     try:
