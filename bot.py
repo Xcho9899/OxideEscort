@@ -99,7 +99,8 @@ def init_db():
             username VARCHAR(255),
             nickname VARCHAR(255),
             rating DECIMAL(3, 2) DEFAULT 3.0,
-            completed_deals INT DEFAULT 0
+            completed_deals INT DEFAULT 0,
+            cryptobot_account_created BOOLEAN DEFAULT FALSE
         )
         ''')
         cursor.execute('''
@@ -244,6 +245,74 @@ def add_completed_deal(user_id):
     finally:
         cursor.close()
         return_db(conn)
+
+def is_cryptobot_account_created(user_id):
+    conn = get_db()
+    if not conn:
+        return False
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        SELECT cryptobot_account_created FROM user_profile WHERE user_id = %s
+        ''', (user_id,))
+        result = cursor.fetchone()
+        return result[0] if result else False
+    except:
+        return False
+    finally:
+        cursor.close()
+        return_db(conn)
+
+def set_cryptobot_account_created(user_id):
+    conn = get_db()
+    if not conn:
+        return False
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        UPDATE user_profile SET cryptobot_account_created = TRUE WHERE user_id = %s
+        ''', (user_id,))
+        conn.commit()
+        logger.info(f"✅ CryptoBot account marked as created: {user_id}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ CryptoBot account error: {e}")
+        conn.rollback()
+        return False
+    finally:
+        cursor.close()
+        return_db(conn)
+
+def transfer_to_user(amount_usd: float, user_id: int):
+    try:
+        logger.info(f"Creating transfer: ${amount_usd} to user {user_id}")
+        headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN, "Content-Type": "application/json"}
+        payload = {
+            "user_id": user_id,
+            "amount": str(amount_usd),
+            "asset": "USDT",
+            "spend_from": "wallet"
+        }
+        
+        logger.info(f"Transfer payload: {payload}")
+        response = requests.post(f"{CRYPTOBOT_API}/transfer", headers=headers, json=payload, timeout=10)
+        
+        logger.info(f"CryptoBot transfer status: {response.status_code}")
+        logger.info(f"CryptoBot transfer response: {response.text}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('ok'):
+                transfer_data = data.get('result', {})
+                transfer_id = transfer_data.get('transfer_id')
+                logger.info(f"✅ Transfer created: {transfer_id}")
+                return True, transfer_id
+        
+        logger.error(f"❌ Transfer failed: {response.text}")
+        return False, response.text
+    except Exception as e:
+        logger.error(f"❌ Transfer error: {e}")
+        return False, str(e)
 
 def get_invoice(invoice_id):
     conn = get_db()
@@ -727,37 +796,7 @@ def check_invoice_paid(invoice_id: str):
     except:
         return False
 
-def create_check(amount_usd: float, user_id: int):
-    try:
-        logger.info(f"Creating check: ${amount_usd} for user {user_id}")
-        headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN, "Content-Type": "application/json"}
-        payload = {
-            "asset": "USDT",
-            "amount": str(amount_usd),
-            "user_id": user_id,
-            "description": "Вывод заработков из OxideEscort"
-        }
-        
-        logger.info(f"Check payload: {payload}")
-        response = requests.post(f"{CRYPTOBOT_API}/createCheck", headers=headers, json=payload, timeout=10)
-        
-        logger.info(f"CryptoBot status: {response.status_code}")
-        logger.info(f"CryptoBot response: {response.text}")
-        
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('ok'):
-                check_data = data.get('result', {})
-                check_url = check_data.get('bot_check_url')
-                check_id = check_data.get('check_id')
-                logger.info(f"✅ Check created: {check_url}")
-                return True, check_url, check_id
-        
-        logger.error(f"❌ Check creation failed: {response.text}")
-        return False, response.text, None
-    except Exception as e:
-        logger.error(f"❌ Check error: {e}")
-        return False, str(e), None
+
 
 def get_main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -1231,6 +1270,56 @@ async def rate_handler(query: CallbackQuery):
         except TelegramBadRequest:
             pass
 
+@router.callback_query(F.data.startswith("confirm_cryptobot_"))
+async def confirm_cryptobot_handler(query: CallbackQuery):
+    await query.answer()
+    parts = query.data.replace("confirm_cryptobot_", "").split("_")
+    amount_usd = float(parts[0])
+    user_id = int(parts[1])
+    
+    # Отмечаем что счет создан
+    if set_cryptobot_account_created(user_id):
+        # Делаем transfer сразу
+        success, transfer_id = transfer_to_user(amount_usd, user_id)
+        
+        if success:
+            rate = get_usdt_rub_rate()
+            balance = get_wallet(user_id)
+            amount_rub = convert_usd_to_rub(amount_usd)
+            new_balance = balance - amount_rub
+            
+            if update_wallet(user_id, new_balance):
+                add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd}')
+                save_withdrawal(user_id, amount_usd, 'success', transfer_id)
+                
+                try:
+                    await query.message.edit_text(
+                        f"✅ <b>ДЕНЬГИ ПЕРЕВЕДЕНЫ!</b>\n\n"
+                        f"Сумма: ${amount_usd}\n"
+                        f"Новый баланс: {new_balance:.0f}р\n"
+                        f"ID перевода: {transfer_id}\n\n"
+                        f"Деньги придут в ваш кошелек @CryptoBot за 1-2 минуты\n\n"
+                        f"Со следующего раза вывод будет мгновенный! ⚡",
+                        reply_markup=get_main_menu()
+                    )
+                except TelegramBadRequest:
+                    pass
+            else:
+                try:
+                    await query.message.edit_text("❌ Ошибка баланса!", reply_markup=get_main_menu())
+                except TelegramBadRequest:
+                    pass
+        else:
+            try:
+                await query.message.edit_text(f"❌ Ошибка перевода: {transfer_id}", reply_markup=get_main_menu())
+            except TelegramBadRequest:
+                pass
+    else:
+        try:
+            await query.message.edit_text("❌ Ошибка при сохранении!", reply_markup=get_main_menu())
+        except TelegramBadRequest:
+            pass
+
 @router.callback_query(F.data == "contact_mod")
 async def contact_mod_handler(query: CallbackQuery):
     await query.answer()
@@ -1455,28 +1544,53 @@ async def withdraw_amount(message: Message, state: FSMContext):
             await state.clear()
             return
         
-        success, check_url_or_error, check_id = create_check(amount_usd, user_id)
+        # ✅ ПРОВЕРЯЕМ СОЗДАН ЛИ СЧЕТ CRYPTOBOT
+        account_created = is_cryptobot_account_created(user_id)
         
-        if success:
-            amount_rub = convert_usd_to_rub(amount_usd)
-            new_balance = balance - amount_rub
-            
-            if update_wallet(user_id, new_balance):
-                add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd}')
-                save_withdrawal(user_id, amount_usd, 'success', check_id)
-                
-                keyboard = [[InlineKeyboardButton(text="💳 Забрать", url=check_url_or_error)]]
-                await message.answer(
-                    f"✅ ${amount_usd}\n"
-                    f"Баланс: {new_balance:.0f}р",
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-                )
-            else:
-                await message.answer("❌ Ошибка!", reply_markup=get_main_menu())
+        if not account_created:
+            # ПЕРВЫЙ РАЗ - ИНСТРУКЦИЯ
+            keyboard = [
+                [InlineKeyboardButton(text="📱 Открыть @CryptoBot", url="https://t.me/CryptoBot")],
+                [InlineKeyboardButton(text="✅ Готово! Я создал счет", callback_data=f"confirm_cryptobot_{amount_usd}_{user_id}")],
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+            ]
+            await message.answer(
+                f"💡 <b>ПЕРВЫЙ ВЫВОД!</b>\n\n"
+                f"Вам нужно создать счет в @CryptoBot\n\n"
+                f"1️⃣ Нажмите кнопку 'Открыть @CryptoBot'\n"
+                f"2️⃣ Напишите боту: /start\n"
+                f"3️⃣ Выберите или создайте кошелек USDT\n"
+                f"4️⃣ Вернитесь и нажмите 'Готово!'\n\n"
+                f"После этого все выводы будут автоматически! ✅",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+            )
+            await state.clear()
         else:
-            await message.answer(f"❌ {check_url_or_error}", reply_markup=get_main_menu())
-        
-        await state.clear()
+            # УЖЕ СОЗДАН - АВТОМАТИЧЕСКИЙ TRANSFER
+            success, transfer_id = transfer_to_user(amount_usd, user_id)
+            
+            if success:
+                amount_rub = convert_usd_to_rub(amount_usd)
+                new_balance = balance - amount_rub
+                
+                if update_wallet(user_id, new_balance):
+                    add_history(user_id, 'withdraw', amount_rub, f'Вывод ${amount_usd}')
+                    save_withdrawal(user_id, amount_usd, 'success', transfer_id)
+                    
+                    await message.answer(
+                        f"✅ <b>ДЕНЕЖИ ПЕРЕВЕДЕНЫ!</b>\n\n"
+                        f"Сумма: ${amount_usd}\n"
+                        f"Новый баланс: {new_balance:.0f}р\n"
+                        f"ID перевода: {transfer_id}\n\n"
+                        f"Деньги придут в ваш кошелек @CryptoBot за 1-2 минуты",
+                        reply_markup=get_main_menu()
+                    )
+                else:
+                    await message.answer("❌ Ошибка баланса!", reply_markup=get_main_menu())
+            else:
+                await message.answer(f"❌ Ошибка перевода: {transfer_id}", reply_markup=get_main_menu())
+            
+            await state.clear()
     except ValueError:
         await message.answer("❌ Число!", reply_markup=get_main_menu())
         await state.clear()
