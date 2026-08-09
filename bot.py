@@ -158,6 +158,10 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+        # ✅ Обновляем рейтинг модератора на 3.0
+        cursor.execute('''
+        UPDATE user_profile SET rating = 3.0 WHERE user_id = %s
+        ''', (MODERATOR_ID,))
         conn.commit()
         logger.info("✅ Database tables created")
     except Exception as e:
@@ -197,6 +201,46 @@ def get_profile(user_id):
         return cursor.fetchone()
     except:
         return None
+    finally:
+        cursor.close()
+        return_db(conn)
+
+def update_user_rating(user_id, new_rating):
+    conn = get_db()
+    if not conn:
+        return False
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        UPDATE user_profile SET rating = %s WHERE user_id = %s
+        ''', (new_rating, user_id))
+        conn.commit()
+        logger.info(f"✅ Rating updated: user={user_id}, rating={new_rating}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Rating update error: {e}")
+        conn.rollback()
+        return False
+    finally:
+        cursor.close()
+        return_db(conn)
+
+def add_completed_deal(user_id):
+    conn = get_db()
+    if not conn:
+        return False
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        UPDATE user_profile SET completed_deals = completed_deals + 1 WHERE user_id = %s
+        ''', (user_id,))
+        conn.commit()
+        logger.info(f"✅ Completed deals +1: user={user_id}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Completed deals error: {e}")
+        conn.rollback()
+        return False
     finally:
         cursor.close()
         return_db(conn)
@@ -685,6 +729,7 @@ def check_invoice_paid(invoice_id: str):
 
 def create_check(amount_usd: float, user_id: int):
     try:
+        logger.info(f"Creating check: ${amount_usd} for user {user_id}")
         headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN, "Content-Type": "application/json"}
         payload = {
             "asset": "USDT",
@@ -693,7 +738,11 @@ def create_check(amount_usd: float, user_id: int):
             "description": "Вывод заработков из OxideEscort"
         }
         
+        logger.info(f"Check payload: {payload}")
         response = requests.post(f"{CRYPTOBOT_API}/createCheck", headers=headers, json=payload, timeout=10)
+        
+        logger.info(f"CryptoBot status: {response.status_code}")
+        logger.info(f"CryptoBot response: {response.text}")
         
         if response.status_code == 200:
             data = response.json()
@@ -701,11 +750,13 @@ def create_check(amount_usd: float, user_id: int):
                 check_data = data.get('result', {})
                 check_url = check_data.get('bot_check_url')
                 check_id = check_data.get('check_id')
+                logger.info(f"✅ Check created: {check_url}")
                 return True, check_url, check_id
         
+        logger.error(f"❌ Check creation failed: {response.text}")
         return False, response.text, None
     except Exception as e:
-        logger.error(f"Check error: {e}")
+        logger.error(f"❌ Check error: {e}")
         return False, str(e), None
 
 def get_main_menu():
@@ -1102,6 +1153,9 @@ async def approve_deal_handler(query: CallbackQuery):
         commission = amount_usd * 0.05
         buyer_amount = amount_usd - commission
         
+        add_completed_deal(seller_id)
+        add_completed_deal(buyer_id)
+        
         # УВЕДОМЛЕНИЕ ИСПОЛНИТЕЛЮ
         try:
             await bot.send_message(
@@ -1114,13 +1168,24 @@ async def approve_deal_handler(query: CallbackQuery):
         except:
             pass
         
+        # КНОПКИ ОЦЕНКИ ДЛЯ ПРОДАВЦА
+        keyboard = [
+            [InlineKeyboardButton(text="⭐", callback_data=f"rate_{deal_id}_{buyer_id}_1")],
+            [InlineKeyboardButton(text="⭐⭐", callback_data=f"rate_{deal_id}_{buyer_id}_2")],
+            [InlineKeyboardButton(text="⭐⭐⭐", callback_data=f"rate_{deal_id}_{buyer_id}_3")],
+            [InlineKeyboardButton(text="⭐⭐⭐⭐", callback_data=f"rate_{deal_id}_{buyer_id}_4")],
+            [InlineKeyboardButton(text="⭐⭐⭐⭐⭐", callback_data=f"rate_{deal_id}_{buyer_id}_5")],
+            [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+        ]
+        
         try:
             await query.message.edit_text(
                 f"✅ <b>ЗАВЕРШЕНО!</b>\n\n"
                 f"Вы отправили: ${amount_usd}\n"
                 f"Исполнитель получил: ${buyer_amount}\n"
-                f"Комиссия: ${commission}",
-                reply_markup=get_main_menu()
+                f"Комиссия: ${commission}\n\n"
+                f"⭐ <b>Оцените исполнителя:</b>",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
             )
         except TelegramBadRequest:
             pass
@@ -1130,16 +1195,60 @@ async def approve_deal_handler(query: CallbackQuery):
         except TelegramBadRequest:
             pass
 
+@router.callback_query(F.data.startswith("rate_"))
+async def rate_handler(query: CallbackQuery):
+    await query.answer()
+    parts = query.data.replace("rate_", "").split("_")
+    deal_id = int(parts[0])
+    buyer_id = int(parts[1])
+    rating = int(parts[2])
+    
+    profile = get_profile(buyer_id)
+    if profile:
+        user_id_db, username, nickname, old_rating, completed_deals = profile
+        
+        # Рассчитываем новый рейтинг (среднее)
+        new_rating = round((old_rating + rating) / 2, 2)
+        
+        if update_user_rating(buyer_id, new_rating):
+            try:
+                await query.message.edit_text(
+                    f"✅ <b>СПАСИБО!</b>\n\n"
+                    f"Вы оценили исполнителя на {rating}⭐\n"
+                    f"Новый рейтинг: {new_rating}/5.0",
+                    reply_markup=get_main_menu()
+                )
+            except TelegramBadRequest:
+                pass
+        else:
+            try:
+                await query.message.edit_text("❌ Ошибка оценки!", reply_markup=get_main_menu())
+            except TelegramBadRequest:
+                pass
+    else:
+        try:
+            await query.message.edit_text("❌ Профиль не найден!", reply_markup=get_main_menu())
+        except TelegramBadRequest:
+            pass
+
 @router.callback_query(F.data == "contact_mod")
 async def contact_mod_handler(query: CallbackQuery):
     await query.answer()
+    profile = get_profile(MODERATOR_ID)
+    
+    if profile:
+        user_id_db, username, nickname, rating, completed_deals = profile
+        text = f"📞 <b>МОДЕРАТОР</b>\n\n" \
+                f"@{username}\n" \
+                f"Ник: {nickname or 'Не установлен'}\n" \
+                f"⭐ {rating}/5.0\n" \
+                f"✅ Сделок: {completed_deals}\n\n" \
+                f"Обратитесь к модератору если возникли проблемы"
+    else:
+        text = "📞 <b>МОДЕРАТОР</b>\n\nПрофиль не найден"
+    
     try:
-        await query.message.edit_text(
-            f"📞 <b>МОДЕРАТОР</b>\n\n"
-            f"@oxide_escort_bot\n"
-            f"ID: {MODERATOR_ID}",
-            reply_markup=get_main_menu()
-        )
+        await query.message.edit_text(text, reply_markup=get_main_menu())
     except TelegramBadRequest:
         pass
 
