@@ -291,13 +291,20 @@ def set_cryptobot_account_created(user_id):
 
 def transfer_to_user(amount_usd: float, user_id: int):
     try:
+        import uuid
+        import time
+        
+        # Генерируем уникальный spend_id
+        spend_id = f"withdraw_{user_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        
         logger.info(f"🔄 Starting transfer: ${amount_usd} to user {user_id}")
         headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN, "Content-Type": "application/json"}
         payload = {
             "user_id": user_id,
             "amount": str(amount_usd),
             "asset": "USDT",
-            "spend_from": "wallet"
+            "spend_from": "wallet",
+            "spend_id": spend_id
         }
         
         logger.info(f"📤 Transfer payload: {payload}")
