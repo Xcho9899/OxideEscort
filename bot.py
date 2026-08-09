@@ -98,7 +98,7 @@ def init_db():
             user_id BIGINT PRIMARY KEY,
             username VARCHAR(255),
             nickname VARCHAR(255),
-            rating DECIMAL(3, 2) DEFAULT 5.0,
+            rating DECIMAL(3, 2) DEFAULT 3.0,
             completed_deals INT DEFAULT 0
         )
         ''')
@@ -133,6 +133,7 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+        cursor.execute('DROP TABLE IF EXISTS deals')
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS deals (
             id SERIAL PRIMARY KEY,
