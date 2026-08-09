@@ -796,6 +796,7 @@ def get_main_menu():
         [InlineKeyboardButton(text="🎯 Активные сделки", callback_data="active_deals")],
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
         [InlineKeyboardButton(text="💳 Кошелек", callback_data="wallet")],
+        [InlineKeyboardButton(text="💰 Мои пополнения", callback_data="my_deposits")],
         [InlineKeyboardButton(text="📜 История", callback_data="history")],
     ])
 
@@ -1310,6 +1311,36 @@ async def confirm_deal_final(query: CallbackQuery):
         except TelegramBadRequest:
             pass
 
+@router.callback_query(F.data == "my_deposits")
+async def my_deposits_handler(query: CallbackQuery):
+    await query.answer()
+    user_id = query.from_user.id
+    pending_invoices = get_pending_invoices(user_id)
+    
+    if not pending_invoices:
+        try:
+            await query.message.edit_text(
+                "💰 <b>Мои пополнения</b>\n\n"
+                "Нет ожидающих пополнений",
+                reply_markup=get_main_menu()
+            )
+        except TelegramBadRequest:
+            pass
+    else:
+        text = "💰 <b>Мои пополнения:</b>\n\n"
+        keyboard = []
+        
+        for invoice_id, amount_usd, status, created_at in pending_invoices:
+            text += f"💵 ${amount_usd} | ⏳ {status}\n"
+            keyboard.append([InlineKeyboardButton(text=f"✅ Проверить #{invoice_id}", callback_data=f"check_{invoice_id}")])
+        
+        keyboard.append([InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")])
+        
+        try:
+            await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+        except TelegramBadRequest:
+            pass
+
 @router.callback_query(F.data == "contact_mod")
 async def contact_mod_handler(query: CallbackQuery):
     await query.answer()
@@ -1486,10 +1517,11 @@ async def deposit_amount(message: Message, state: FSMContext):
         if pay_url and invoice_id:
             keyboard = [
                 [InlineKeyboardButton(text="💳 Оплатить", url=pay_url)],
-                [InlineKeyboardButton(text="✅ Проверить", callback_data=f"check_{invoice_id}")],
+                [InlineKeyboardButton(text="✅ Проверить платеж", callback_data=f"check_{invoice_id}")],
+                [InlineKeyboardButton(text="💰 Мои пополнения", callback_data="my_deposits")],
                 [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
             ]
-            await message.answer(f"💵 {amount_rub:.0f}р = ${amount_usd}", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+            await message.answer(f"💵 {amount_rub:.0f}р = ${amount_usd}\n\n⏳ Ожидание оплаты...", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
             await state.clear()
         else:
             await message.answer("❌ Ошибка!", reply_markup=get_main_menu())
@@ -1578,7 +1610,15 @@ async def check_payment(query: CallbackQuery):
     
     if status == 'paid':
         try:
-            await query.message.edit_text(f"✅ +${amount_usd}", reply_markup=get_main_menu())
+            await query.message.edit_text(
+                f"✅ <b>ОПЛАЧЕНО!</b>\n\n"
+                f"${amount_usd} успешно пополнено!\n\n"
+                f"Баланс обновлен",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💰 Мои пополнения", callback_data="my_deposits")],
+                    [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+                ])
+            )
         except TelegramBadRequest:
             pass
         return
@@ -1592,12 +1632,30 @@ async def check_payment(query: CallbackQuery):
         add_history(user_id, 'deposit', amount_rub, f'Платеж ${amount_usd}')
         update_invoice_status(invoice_id, 'paid')
         try:
-            await query.message.edit_text(f"✅ +${amount_usd}\nБаланс: {new_balance:.0f}р", reply_markup=get_main_menu())
+            await query.message.edit_text(
+                f"✅ <b>ОПЛАЧЕНО!</b>\n\n"
+                f"${amount_usd} успешно пополнено!\n"
+                f"Баланс: {new_balance:.0f}р",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💰 Мои пополнения", callback_data="my_deposits")],
+                    [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+                ])
+            )
         except TelegramBadRequest:
             pass
     else:
         try:
-            await query.message.edit_text("⏳ Еще не пришел", reply_markup=get_main_menu())
+            await query.message.edit_text(
+                f"⏳ <b>Ожидание платежа...</b>\n\n"
+                f"${amount_usd}\n\n"
+                f"Платеж еще не поступил.\n"
+                f"Попробуйте позже.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Проверить снова", callback_data=f"check_{invoice_id}")],
+                    [InlineKeyboardButton(text="💰 Мои пополнения", callback_data="my_deposits")],
+                    [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
+                ])
+            )
         except TelegramBadRequest:
             pass
 
