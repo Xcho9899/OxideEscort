@@ -24,6 +24,7 @@ CRYPTOBOT_API = "https://pay.crypt.bot/api"
 CRYPTOBOT_TOKEN = os.environ.get('CRYPTO_BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 MODERATOR_ID = 8563207482
+MODERATOR_USERNAME = "Aiassistant1"
 
 WEBHOOK_URL = "/webhook/telegram"
 WEBHOOK_HOST = "oxideescort-3.onrender.com"
@@ -1423,7 +1424,7 @@ async def help_menu_handler(query: CallbackQuery):
                 [InlineKeyboardButton(text="🎯 Как выполнять задания?", callback_data="help_tasks")],
                 [InlineKeyboardButton(text="📝 Как создать объявление?", callback_data="help_create_offer")],
                 [InlineKeyboardButton(text="⭐ Как работает рейтинг?", callback_data="help_rating")],
-                [InlineKeyboardButton(text="📞 Написать поддержке", url=f"https://t.me/{MODERATOR_ID}")],
+                [InlineKeyboardButton(text="📞 Написать поддержке", url=f"https://t.me/{MODERATOR_USERNAME}")],
                 [InlineKeyboardButton(text="🏠 Меню", callback_data="return_main")]
             ])
         )
