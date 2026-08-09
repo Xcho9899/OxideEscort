@@ -216,7 +216,7 @@ def get_profile(user_id):
         cursor.close()
         return_db(conn)
 
-def get_pending_invoices(user_id):
+
     conn = get_db()
     if not conn:
         return []
@@ -283,6 +283,33 @@ def update_invoice_status(invoice_id, status):
         logger.error(f"❌ Update error: {e}")
         conn.rollback()
         return False
+    finally:
+        cursor.close()
+        return_db(conn)
+
+def delete_expired_invoices(user_id):
+    """Удалить инвойсы которые не оплачены более 5 минут"""
+    conn = get_db()
+    if not conn:
+        logger.error(f"❌ No DB connection for delete expired")
+        return 0
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        DELETE FROM invoices 
+        WHERE user_id = %s 
+        AND status = %s 
+        AND created_at < NOW() - INTERVAL '5 minutes'
+        ''', (user_id, 'pending'))
+        deleted_count = cursor.rowcount
+        conn.commit()
+        if deleted_count > 0:
+            logger.info(f"✅ Deleted {deleted_count} expired invoices for user {user_id}")
+        return deleted_count
+    except Exception as e:
+        logger.error(f"❌ Delete expired error: {e}")
+        conn.rollback()
+        return 0
     finally:
         cursor.close()
         return_db(conn)
@@ -1315,19 +1342,44 @@ async def confirm_deal_final(query: CallbackQuery):
 async def my_deposits_handler(query: CallbackQuery):
     await query.answer()
     user_id = query.from_user.id
-    pending_invoices = get_pending_invoices(user_id)
+    
+    # Удалить инвойсы старше 5 минут
+    delete_expired_invoices(user_id)
+    
+    # Получить оставшиеся пополнения
+    conn = get_db()
+    if not conn:
+        try:
+            await query.message.edit_text("❌ Ошибка БД!", reply_markup=get_main_menu())
+        except TelegramBadRequest:
+            pass
+        return
+    
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+        SELECT invoice_id, amount_usd::double precision, status, created_at 
+        FROM invoices WHERE user_id = %s AND status = %s
+        ORDER BY created_at DESC
+        ''', (user_id, 'pending'))
+        pending_invoices = cursor.fetchall()
+    except:
+        pending_invoices = []
+    finally:
+        cursor.close()
+        return_db(conn)
     
     if not pending_invoices:
         try:
             await query.message.edit_text(
                 "💰 <b>Мои пополнения</b>\n\n"
-                "Нет ожидающих пополнений",
+                "✅ Нет ожидающих пополнений",
                 reply_markup=get_main_menu()
             )
         except TelegramBadRequest:
             pass
     else:
-        text = "💰 <b>Мои пополнения:</b>\n\n"
+        text = "💰 <b>Мои пополнения (активные 5 мин):</b>\n\n"
         keyboard = []
         
         for invoice_id, amount_usd, status, created_at in pending_invoices:
