@@ -2156,6 +2156,34 @@ async def ban_reason_handler(message: Message, state: FSMContext):
     
     await state.clear()
 
+async def cryptobot_webhook_handler(request):
+    """Обработка вебхука от CryptoBot"""
+    try:
+        data = await request.json()
+        logger.info(f"🔔 CryptoBot webhook received: {data}")
+        
+        # Проверяем данные платежа
+        if data.get('update_type') == 'invoice_paid':
+            invoice_id = data.get('payload', {}).get('invoice_id')
+            user_id = data.get('payload', {}).get('user_id')
+            amount = data.get('payload', {}).get('amount')
+            
+            if invoice_id:
+                logger.info(f"✅ Invoice paid: {invoice_id}, user: {user_id}, amount: {amount}")
+                
+                # Обновляем статус инвойса
+                if update_invoice_status(invoice_id, 'paid'):
+                    logger.info(f"✅ Invoice status updated: {invoice_id}")
+                else:
+                    logger.error(f"❌ Failed to update invoice: {invoice_id}")
+        
+        return web.json_response({'ok': True})
+    except Exception as e:
+        logger.error(f"❌ CryptoBot webhook error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return web.json_response({'ok': False, 'error': str(e)}, status=400)
+
 async def on_startup(bot: Bot) -> None:
     try:
         await bot.delete_webhook()
@@ -2174,9 +2202,15 @@ async def main():
     
     dp.startup.register(on_startup)
     app = web.Application()
+    
+    # Регистрируем CryptoBot вебхук
+    app.router.post('/webhook/cryptobot')(cryptobot_webhook_handler)
+    
     webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_handler.register(app, path=WEBHOOK_URL)
     setup_application(app, dp, bot=bot)
+    logger.info(f"✅ Telegram webhook registered: {BASE_WEBHOOK_URL}{WEBHOOK_URL}")
+    logger.info(f"✅ CryptoBot webhook registered: {BASE_WEBHOOK_URL}/webhook/cryptobot")
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
