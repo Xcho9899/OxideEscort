@@ -2204,7 +2204,7 @@ async def main():
     app = web.Application()
     
     # Регистрируем CryptoBot вебхук
-    app.router.post('/webhook/cryptobot')(cryptobot_webhook_handler)
+    app.router.add_post('/webhook/cryptobot', cryptobot_webhook_handler)
     
     webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_handler.register(app, path=WEBHOOK_URL)
